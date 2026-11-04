@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="1024"
+    android:viewportHeight="1024">
+    <!-- Flat pill + droplet, Lagrio-style: bold shapes, diagonal two-tone fold. -->
+    <group>
+        <clip-path android:pathData="M292,482 H732 A80,80 0 0 1 732,642 H292 A80,80 0 0 1 292,482 Z" />
+        <path
+            android:fillColor="#FF5147"
+            android:pathData="M212,482 L452,482 L352,642 L212,642 Z" />
+        <path
+            android:fillColor="#E02E24"
+            android:pathData="M452,482 L812,482 L812,642 L352,642 Z" />
+    </group>
+    <path
+        android:fillColor="#C81C14"
+        android:pathData="M424,472 a88,88 0 1,0 176,0 a88,88 0 1,0 -176,0" />
+</vector>
