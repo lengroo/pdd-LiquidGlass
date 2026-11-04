@@ -2,7 +2,7 @@
 
 为拼多多打造的 iOS 26 风格液态玻璃底部导航栏 · LSPosed 模块（libxposed API 102）
 
-> ⚠️ 本仓库目前只有 README：代码暂未同步，首个版本将随代码同步后发布。安装步骤先行写出，供同步后对照。
+> 首个公开版：v1.0.10，APK 见 [Releases](https://github.com/lengroo/pdd-LiquidGlass/releases)。
 
 ## ✨ 特性
 
@@ -118,4 +118,4 @@ lens(refractionHeight = 10dp × p, refractionAmount = 14dp × p,
 
 ## 📄 License
 
-MIT，与上游相同。LICENSE 文件随代码同步时一并加入。
+MIT，与上游相同，见 [LICENSE](LICENSE)。
