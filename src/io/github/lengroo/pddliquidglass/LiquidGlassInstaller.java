@@ -1311,8 +1311,7 @@ final class LiquidGlassInstaller {
             // reads as the bar falling out of the glass. The pill is a fixed
             // navigation surface, so inside it the bar's position and
             // opacity belong to the host: pin both, every frame.
-            sDiagRawBarTy = tabView.getTranslationY();
-            if (sDiagRawBarTy != 0f) {
+            if (tabView.getTranslationY() != 0f) {
                 tabView.setTranslationY(0f);
             }
             if (tabView.getAlpha() != 1f) {
@@ -1333,7 +1332,7 @@ final class LiquidGlassInstaller {
         // Only worth computing while the bar is actually moving.
         if (LiquidGlassModule.app() == HostApp.PDD) {
             // Held at zero for PDD while its bar's scroll-linked translations
-            // are being measured (see pddDiagnostics): the shortfall scaling
+            // exist (proven by the 1.0.3 field test): the shortfall scaling
             // below exists for WeChat's deliberate full-height hide, and on
             // the 1.0.2 field test the whole pill visibly bobbed over the
             // feed while scrolling. The glass and droplet still mirror the
@@ -1708,9 +1707,6 @@ final class LiquidGlassInstaller {
                 // has gone back to clipping its padding paints an opaque band
                 // over the content it is scrolling.
                 maintainScrollerPadding();
-                if (LiquidGlassModule.app() == HostApp.PDD) {
-                    pddDiagnostics(host);
-                }
                 sPageExtent.request();
                 maintainDropletGeometry();
                 ViewGroup tabRow = sTabRowRef.get();
@@ -1733,48 +1729,6 @@ final class LiquidGlassInstaller {
             }
             return true;
         });
-    }
-
-    /* ---------------- PDD scroll-wobble diagnostics (1.0.3) ---------------- */
-
-    private static long sDiagLastMs;
-    private static int sDiagLastKey;
-    /** The bar's translationY before the per-frame pin zeroes it. */
-    private static volatile float sDiagRawBarTy;
-
-    /**
-     * Throttled snapshot of everything that could be moving the pill while
-     * PDD's feed scrolls: the bar's own translation, the host's on-screen
-     * position, and both heights. Logged on change only (and at most every
-     * 250ms), so one scrolling session in the exported log settles which of
-     * them actually moves. Remove once the wobble is explained.
-     */
-    private static void pddDiagnostics(LiquidGlassHostLayout host) {
-        View tabView = sTabViewRef.get();
-        if (tabView == null) {
-            return;
-        }
-        int[] hostLoc = new int[2];
-        int[] barLoc = new int[2];
-        host.getLocationOnScreen(hostLoc);
-        tabView.getLocationOnScreen(barLoc);
-        int key = (int) (sDiagRawBarTy * 2f)
-                ^ (hostLoc[1] << 1) ^ (barLoc[1] << 5)
-                ^ (tabView.getHeight() << 11) ^ (host.getHeight() << 17);
-        long now = android.os.SystemClock.uptimeMillis();
-        if (key == sDiagLastKey || now - sDiagLastMs < 250L) {
-            return;
-        }
-        sDiagLastKey = key;
-        sDiagLastMs = now;
-        LiquidGlassModule.log(android.util.Log.INFO,
-                "diag: barTy=" + sDiagRawBarTy
-                        + " hostTy=" + host.getTranslationY()
-                        + " hostTop=" + hostLoc[1]
-                        + " barTop=" + barLoc[1]
-                        + " hostH=" + host.getHeight()
-                        + " barH=" + tabView.getHeight()
-                        + " sig=" + sTabStructureSignature);
     }
 
     /**

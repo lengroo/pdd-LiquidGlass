@@ -126,6 +126,16 @@ final class LiquidGlassPanel extends View {
     private float mCapturedScale;
     private boolean mCaptured;
     private boolean mRecapturedLastFrame;
+
+    /**
+     * 1.0.11 flicker fix: the glass used to re-capture on every frame of a
+     * continuously-redrawing page (~60/s, each with a blur + lens pass), and
+     * on the 11.11 venue page that load made the page itself flash white.
+     * The backdrop is blurred, so nobody can see a 50ms-old capture: at most
+     * one re-capture per interval, and with it at most one glass redraw.
+     */
+    private static final long CAPTURE_MIN_INTERVAL_MS = 50L;
+    private long mLastCaptureMs;
     private RuntimeShader mLens;
     private RenderEffect mChain;
     private int mChainW;
@@ -270,6 +280,7 @@ final class LiquidGlassPanel extends View {
         // Noted whether or not the capture below succeeds: a capture that
         // cannot be taken must not read as permanently stale.
         mCaptured = true;
+        mLastCaptureMs = android.os.SystemClock.uptimeMillis();
         ViewGeom.unscaledScreenPos(this, mCapturedAt);
         mCapturedScale = ViewGeom.cumulativeScale(this);
         drawPanel(canvas, w, h, h * 0.5f, mNode, mCapturedAt, mCapturedScale);
@@ -321,6 +332,13 @@ final class LiquidGlassPanel extends View {
             ViewGeom.unscaledScreenPos(this, mProbe);
             stale = mProbe[0] != mCapturedAt[0] || mProbe[1] != mCapturedAt[1]
                     || ViewGeom.cumulativeScale(this) != mCapturedScale;
+        }
+        if (stale && mCaptured
+                && android.os.SystemClock.uptimeMillis() - mLastCaptureMs
+                        < CAPTURE_MIN_INTERVAL_MS) {
+            // Too soon: reuse the last capture (and skip the redraw, since
+            // the blur + lens are only re-applied when this view draws).
+            stale = false;
         }
         mRecapturedLastFrame = stale;
         return stale;
@@ -394,6 +412,15 @@ final class LiquidGlassPanel extends View {
         canvas.restoreToCount(save);
     }
 
+    // 1.0.11 fix: effect gating by visible page type. Diag3/4/5 proved that
+    // ANY RenderEffect on the glass node makes PDD's hybrid venue page
+    // (TouchEventInterceptView) flash white — blur alone and lens alone
+    // both trigger it — while capture alone and no effect never do, and
+    // native pages (FrameLayout) never flicker with the full effect. So
+    // the effect runs only when no visible page is a known hybrid
+    // container; on hybrid pages the pill falls back to flat wash + rim.
+    // If PDD renames the venue container in a later version, the gate
+    // misses and the flicker returns for that page — add its class here.
     private void drawGlass(Canvas canvas, int w, int h, float radius,
                            RenderNode node, int[] self, float captureScale) {
         ViewGroup pager = mBackdropRef.get();
@@ -422,27 +449,44 @@ final class LiquidGlassPanel extends View {
         // Every uniform here is a function of the pill's size, so the whole
         // chain only has to be rebuilt when that changes. Building it per frame
         // meant three native effect objects churned on every single frame.
-        if (mChain == null || mChainW != w || mChainH != h) {
-            float blur = BLUR_DP * mDensity;
-            RenderEffect frost = RenderEffect.createBlurEffect(blur, blur, mSaturate,
-                    Shader.TileMode.CLAMP);
-            if (mLens != null) {
-                mLens.setFloatUniform("size", w, h);
-                mLens.setFloatUniform("offset", -mPad, -mPad);
-                mLens.setFloatUniform("cornerRadii", radius, radius, radius, radius);
-                mLens.setFloatUniform("refractionHeight", REFRACTION_DP * mDensity);
-                // KernelSU passes the amount negated.
-                mLens.setFloatUniform("refractionAmount", -REFRACTION_DP * mDensity);
-                mLens.setFloatUniform("depthEffect", 0f);
-                mChain = RenderEffect.createChainEffect(
-                        RenderEffect.createRuntimeShaderEffect(mLens, "content"), frost);
-            } else {
-                mChain = frost;
+        boolean hybrid = false;
+        for (int i = 0; i < pager.getChildCount(); i++) {
+            View child = pager.getChildAt(i);
+            if (child.getVisibility() != View.VISIBLE) {
+                continue;
             }
-            mChainW = w;
-            mChainH = h;
+            String name = child.getClass().getName();
+            if (name.contains("TouchEventInterceptView")
+                    || name.contains("WebView")) {
+                hybrid = true;
+            }
         }
-        node.setRenderEffect(mChain);
+        if (hybrid) {
+            // Flat wash + rim only; any RenderEffect here flashes the page.
+            node.setRenderEffect(null);
+        } else {
+            if (mChain == null || mChainW != w || mChainH != h) {
+                float blur = BLUR_DP * mDensity;
+                RenderEffect frost = RenderEffect.createBlurEffect(blur, blur, mSaturate,
+                        Shader.TileMode.CLAMP);
+                if (mLens != null) {
+                    mLens.setFloatUniform("size", w, h);
+                    mLens.setFloatUniform("offset", -mPad, -mPad);
+                    mLens.setFloatUniform("cornerRadii", radius, radius, radius, radius);
+                    mLens.setFloatUniform("refractionHeight", REFRACTION_DP * mDensity);
+                    // KernelSU passes the amount negated.
+                    mLens.setFloatUniform("refractionAmount", -REFRACTION_DP * mDensity);
+                    mLens.setFloatUniform("depthEffect", 0f);
+                    mChain = RenderEffect.createChainEffect(
+                            RenderEffect.createRuntimeShaderEffect(mLens, "content"), frost);
+                } else {
+                    mChain = frost;
+                }
+                mChainW = w;
+                mChainH = h;
+            }
+            node.setRenderEffect(mChain);
+        }
 
         canvas.save();
         canvas.clipPath(mClip);
