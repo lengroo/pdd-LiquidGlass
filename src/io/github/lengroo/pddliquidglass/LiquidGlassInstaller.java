@@ -690,10 +690,28 @@ final class LiquidGlassInstaller {
             return;
         }
         if (LiquidGlassModule.app() == HostApp.PDD) {
-            // Nothing to stretch, frost-drop or pad: the probe showed PDD's
-            // pages already laid out at full height, extending under the bar,
-            // with their own bottom reserve for it. The surgery below exists
-            // for pages that stop where the docked bar started.
+            // Expand the feed to fill the black strip below the pill.
+            // PDD's pages are NOT full height — the backdrop is 2464px on
+            // a 2800px parent, so the feed can never reach the strip below
+            // the pill no matter how its padding is cleared. Stretch the
+            // backdrop, the CustomViewPager and its pages to the parent's
+            // full height first; only then can the scroller pass below fill
+            // the strip. Clearing the scrollers' bottom padding to 0 lets
+            // rows lay out all the way to the parent's bottom, so the strip
+            // shows product rows instead of the window background. The last
+            // row then sits partly under the pill (visible through the
+            // glass) instead of scrolling fully clear. The nav strip below
+            // the parent is outside the feed and stays black — only the
+            // band inside the parent fills. This runs on install and on
+            // every tab change (the watcher posts extendPagesToBottom when
+            // sel changes), so new pages get it too.
+            stretchPddContentToBottom(pager);
+            padScrollersBottom(pager, 0, 0);
+            if (!sFeedExpandLogged) {
+                sFeedExpandLogged = true;
+                LiquidGlassModule.log(android.util.Log.INFO,
+                        "pdd feed expand: scrollers padded to 0");
+            }
             return;
         }
         // The pager itself first. A page can only be stretched as far as its
@@ -957,14 +975,21 @@ final class LiquidGlassInstaller {
     private static final java.util.ArrayList<WeakReference<ViewGroup>> sPaddedScrollers =
             new java.util.ArrayList<>();
     private static int sScrollerPad;
+    private static boolean sFeedExpandLogged;
+    private static boolean sFeed2Logged;
+    private static boolean sFeed4Logged;
+    private static boolean sPddOffscreenLogged;
+    private static int sPddExpandFrame;
     private static final int MAX_TRACKED_SCROLLERS = 16;
 
     /** Re-asserts the scroll padding and the clipping flag on every frame. */
     private static void maintainScrollerPadding() {
-        int pad = sScrollerPad;
-        if (pad <= 0) {
+        // A 0 pad is a real target now (PDD's feed expand),
+        // not "no pad known yet". Only skip when nothing is tracked at all.
+        if (sPaddedScrollers.isEmpty()) {
             return;
         }
+        int pad = sScrollerPad;
         for (int i = 0; i < sPaddedScrollers.size(); i++) {
             ViewGroup v = sPaddedScrollers.get(i).get();
             if (v == null) {
@@ -976,6 +1001,23 @@ final class LiquidGlassInstaller {
             if (v.getPaddingBottom() != pad) {
                 v.setPadding(v.getPaddingLeft(), v.getPaddingTop(),
                         v.getPaddingRight(), pad);
+            }
+            // A MATCH_PARENT list only reaches the parent's bottom if the
+            // parent has no bottom reserve of its own. PDD puts the
+            // reserve back on the page on layout passes, so keep the
+            // tracked scroller's parent clear of it too, every frame.
+            if (LiquidGlassModule.app() == HostApp.PDD) {
+                android.view.ViewParent parent = v.getParent();
+                if (parent instanceof ViewGroup) {
+                    ViewGroup pv = (ViewGroup) parent;
+                    if (pv.getClipToPadding()) {
+                        pv.setClipToPadding(false);
+                    }
+                    if (pv.getPaddingBottom() != 0) {
+                        pv.setPadding(pv.getPaddingLeft(), pv.getPaddingTop(),
+                                pv.getPaddingRight(), 0);
+                    }
+                }
             }
         }
     }
@@ -990,6 +1032,215 @@ final class LiquidGlassInstaller {
             sPaddedScrollers.remove(0);
         }
         sPaddedScrollers.add(new WeakReference<>(scroller));
+    }
+
+    /**
+     * Stretches PDD's content to the parent's full height. The backdrop
+     * (content FrameLayout) is 2464px on a 2800px parent — it ends 336px
+     * above the parent's bottom, so the feed can never reach the strip
+     * below the pill no matter how its padding is cleared. Stretch the
+     * backdrop, then the CustomViewPager and its pages, so the feed can
+     * extend into the strip.
+     */
+    private static void stretchPddContentToBottom(ViewGroup pager) {
+        if (pager == null) {
+            return;
+        }
+        ViewGroup pagerParent = pager.getParent() instanceof ViewGroup
+                ? (ViewGroup) pager.getParent() : null;
+        if (pagerParent == null || pagerParent.getHeight() <= 0) {
+            return;
+        }
+        int parentHeight = pagerParent.getHeight();
+        stretchToBottom(pager, parentHeight);
+        ViewGroup viewPager = findPddViewPager(pager);
+        if (viewPager != null) {
+            int pageTarget = parentHeight - viewPager.getTop();
+            stretchToBottom(viewPager, parentHeight);
+            for (int i = 0; i < viewPager.getChildCount(); i++) {
+                View page = viewPager.getChildAt(i);
+                if (page instanceof ViewGroup) {
+                    stretchToBottom(page, pageTarget);
+                    // The page is full height now, but the feed container
+                    // inside it may still be short, so the items end above
+                    // the strip even though the page reaches it. Stretch
+                    // each page's direct children to the page's full
+                    // height too.
+                    for (int j = 0; j < ((ViewGroup) page).getChildCount(); j++) {
+                        View inner = ((ViewGroup) page).getChildAt(j);
+                        if (inner instanceof ViewGroup) {
+                            stretchToBottom(inner, pageTarget);
+                        }
+                    }
+                    // Stretch the feed scroller itself to the full page
+                    // target. It already fills the short page, so a
+                    // plain "fill the parent" pass would skip it — it
+                    // must be stretched to the target height, or the strip
+                    // (below the scroller) stays black on every tab switch.
+                    stretchScrollerInPage((ViewGroup) page, pageTarget);
+                }
+            }
+            // Keep every tab's page alive so a switch never has to create
+            // a short page on demand. The ViewPager only keeps current
+            // ± 1 pages by default, so jumping home (0) → chat (3) creates
+            // the chat page fresh (short) and the strip flashes black
+            // until a later pass stretches it. With an offscreen limit of
+            // 4 all 5 pages are children from install, pre-stretched, and
+            // a switch shows an already-full page. Reflection:
+            // CustomViewPager may not expose the method directly.
+            if (!sPddOffscreenLogged) {
+                sPddOffscreenLogged = true;
+                try {
+                    java.lang.reflect.Method m = null;
+                    Class<?> c = viewPager.getClass();
+                    while (c != null && m == null) {
+                        try {
+                            m = c.getDeclaredMethod(
+                                    "setOffscreenPageLimit", int.class);
+                        } catch (NoSuchMethodException e) {
+                            c = c.getSuperclass();
+                        }
+                    }
+                    if (m != null) {
+                        m.setAccessible(true);
+                        m.invoke(viewPager, 4);
+                        LiquidGlassModule.log(android.util.Log.INFO,
+                                "pdd offscreen: set to 4 on "
+                                + viewPager.getClass().getSimpleName());
+                    } else {
+                        LiquidGlassModule.log(android.util.Log.INFO,
+                                "pdd offscreen: method NOT FOUND on "
+                                + viewPager.getClass().getSimpleName());
+                    }
+                } catch (Exception e) {
+                    LiquidGlassModule.log(android.util.Log.INFO,
+                            "pdd offscreen: FAILED " + e);
+                    // Offscreen limit unavailable — the stretch + 5-frame
+                    // re-run still apply; only the pre-creation benefit is lost.
+                }
+            }
+        }
+        if (!sFeed4Logged) {
+            sFeed4Logged = true;
+            LiquidGlassModule.log(android.util.Log.INFO,
+                    "pdd stretch: parentH=" + parentHeight
+                    + " pagerH=" + pager.getHeight()
+                    + " viewPager=" + (viewPager == null ? "null"
+                    : viewPager.getClass().getSimpleName()
+                    + " h=" + viewPager.getHeight()
+                    + " top=" + viewPager.getTop()));
+        }
+    }
+
+    /** Walks a page's subtree for its feed scroller and stretches it to
+     * the page's full target height. Stretches the scroller if one is
+     * found, otherwise the LARGEST ViewGroup in the page (the feed
+     * container, whatever its class). The home feed scroller
+     * (HomeScrollSpeedOptProductListView) gets an explicit pixel height:
+     * MATCH_PARENT does not stick for it because its ancestors are
+     * WRAP_CONTENT, so PDD re-measures it back to a shorter height every
+     * layout. Other tabs' scrollers/containers keep MATCH_PARENT —
+     * forcing them to a pixel height makes the profile feed vanish. */
+    private static void stretchScrollerInPage(ViewGroup page, int pageTarget) {
+        java.util.ArrayDeque<ViewGroup> queue = new java.util.ArrayDeque<>();
+        queue.add(page);
+        int seen = 0;
+        ViewGroup largest = null;
+        int largestH = -1;
+        while (!queue.isEmpty() && seen < 100) {
+            ViewGroup g = queue.poll();
+            seen++;
+            if (g != page) {
+                if (isScroller(g)) {
+                    // Explicit height only for the home feed scroller.
+                    // Other tabs' scrollers/containers keep MATCH_PARENT —
+                    // forcing them to a pixel height makes the profile
+                    // feed vanish.
+                    if (("com.xunmeng.pinduoduo.app_default_home.widget"
+                            + ".HomeScrollSpeedOptProductListView")
+                            .equals(g.getClass().getName())) {
+                        setExplicitHeight(g, pageTarget);
+                        LiquidGlassModule.log(android.util.Log.INFO,
+                                "pdd home scroller: "
+                                + g.getClass().getSimpleName()
+                                + " h=" + g.getHeight()
+                                + " -> " + pageTarget);
+                    } else {
+                        stretchToBottom(g, pageTarget);
+                        LiquidGlassModule.log(android.util.Log.INFO,
+                                "pdd scroller: "
+                                + g.getClass().getSimpleName()
+                                + " h=" + g.getHeight()
+                                + " -> " + pageTarget);
+                    }
+                    return;
+                }
+                if (g.getHeight() > largestH) {
+                    largestH = g.getHeight();
+                    largest = g;
+                }
+            }
+            for (int i = 0; i < g.getChildCount(); i++) {
+                View c = g.getChildAt(i);
+                if (c instanceof ViewGroup) {
+                    queue.add((ViewGroup) c);
+                }
+            }
+        }
+        if (largest != null && largestH > 0) {
+            stretchToBottom(largest, pageTarget);
+            LiquidGlassModule.log(android.util.Log.INFO,
+                    "pdd largest: "
+                    + largest.getClass().getSimpleName()
+                    + " h=" + largestH + " -> " + pageTarget);
+        }
+    }
+
+    /** Forces a view to an explicit pixel height (plus bottomMargin 0),
+     * instead of MATCH_PARENT which WRAP_CONTENT ancestors ignore on
+     * re-measure. Used only for the home feed scroller. */
+    private static void setExplicitHeight(View v, int heightPx) {
+        ViewGroup.LayoutParams lp = v.getLayoutParams();
+        if (lp == null) {
+            return;
+        }
+        boolean changed = false;
+        if (lp.height != heightPx) {
+            lp.height = heightPx;
+            changed = true;
+        }
+        if (lp instanceof ViewGroup.MarginLayoutParams) {
+            ViewGroup.MarginLayoutParams mlp =
+                    (ViewGroup.MarginLayoutParams) lp;
+            if (mlp.bottomMargin != 0) {
+                mlp.bottomMargin = 0;
+                changed = true;
+            }
+        }
+        if (changed) {
+            v.setLayoutParams(lp);
+        }
+    }
+
+    /** Bounded breadth-first walk for the CustomViewPager in the subtree. */
+    private static ViewGroup findPddViewPager(ViewGroup root) {
+        java.util.ArrayDeque<ViewGroup> queue = new java.util.ArrayDeque<>();
+        queue.add(root);
+        int seen = 0;
+        while (!queue.isEmpty() && seen < 200) {
+            ViewGroup g = queue.poll();
+            seen++;
+            if (g.getClass().getName().contains("ViewPager")) {
+                return g;
+            }
+            for (int i = 0; i < g.getChildCount(); i++) {
+                View c = g.getChildAt(i);
+                if (c instanceof ViewGroup) {
+                    queue.add((ViewGroup) c);
+                }
+            }
+        }
+        return null;
     }
 
     /**
@@ -1018,7 +1269,33 @@ final class LiquidGlassInstaller {
                 // so remove it before stretching the feed itself. Only touch a
                 // top-anchored scroller; title-offset lists keep their origin.
                 int parentHeight = root.getHeight();
-                if (c.getTop() <= 8 && parentHeight - c.getBottom() > 8) {
+                if (LiquidGlassModule.app() == HostApp.PDD) {
+                    // PDD's feed starts below the search bar (top > 8), so
+                    // the top-anchored guard above would skip the stretch
+                    // and the list would stay short. For PDD drop the
+                    // parent's bottom reserve outright and stretch the list
+                    // to the parent's bottom whatever its top (the top
+                    // stays where it is; only the bottom extends).
+                    if (root.getPaddingBottom() > 0) {
+                        root.setClipToPadding(false);
+                        root.setPadding(root.getPaddingLeft(),
+                                root.getPaddingTop(), root.getPaddingRight(), 0);
+                    }
+                    if (parentHeight > 0
+                            && parentHeight - c.getBottom() > 8) {
+                        stretchToBottom(c, parentHeight);
+                        if (!sFeed2Logged) {
+                            sFeed2Logged = true;
+                            LiquidGlassModule.log(android.util.Log.INFO,
+                                    "pdd expand: stretched "
+                                    + c.getClass().getSimpleName()
+                                    + " top=" + c.getTop()
+                                    + " bottom=" + c.getBottom()
+                                    + " parentH=" + parentHeight);
+                        }
+                    }
+                } else if (c.getTop() <= 8
+                        && parentHeight - c.getBottom() > 8) {
                     dropParentBottomReserve(root, c);
                     stretchToBottom(c, parentHeight);
                     keepStretchedToBottom(c);
@@ -1033,7 +1310,10 @@ final class LiquidGlassInstaller {
                     sv.setPadding(sv.getPaddingLeft(), sv.getPaddingTop(),
                             sv.getPaddingRight(), pad);
                 }
-                if (pad > 0) {
+                // Track even when pad is 0 (PDD's feed expand). A 0 pad
+                // still needs the per-frame re-assert or PDD puts its
+                // bottom reserve back on a layout pass.
+                if (pad >= 0) {
                     sScrollerPad = pad;
                     trackPaddedScroller(sv);
                 }
@@ -1707,6 +1987,21 @@ final class LiquidGlassInstaller {
                 // has gone back to clipping its padding paints an opaque band
                 // over the content it is scrolling.
                 maintainScrollerPadding();
+                // The feed RecyclerView may be created after install (PDD
+                // loads it asynchronously), so re-run the whole PDD expand
+                // (stretch + pad) every 5th frame (~80ms) until it is
+                // found, and so PDD cannot put the short pages back on a
+                // layout pass either. After the first successful pass the
+                // setters are no-ops. A newly switched-to page is stretched
+                // within ~80ms of appearing.
+                if (LiquidGlassModule.app() == HostApp.PDD) {
+                    if (++sPddExpandFrame % 5 == 0) {
+                        ViewGroup pgr = sPagerRef.get();
+                        if (pgr != null) {
+                            extendPagesToBottom(pgr);
+                        }
+                    }
+                }
                 sPageExtent.request();
                 maintainDropletGeometry();
                 ViewGroup tabRow = sTabRowRef.get();
