@@ -130,6 +130,7 @@ final class TabBarBridge {
             "com.xunmeng.pinduoduo.ui_home_activity.widget.tab.PddTabView";
 
     private static volatile boolean sPddSetterHooked;
+
     /** Set while our own setter call is on the stack, so it is never wrapped twice. */
     private static final ThreadLocal<Boolean> sWrappingSetter =
             new ThreadLocal<>();
@@ -813,6 +814,20 @@ final class TabBarBridge {
                 }
             }
         } catch (Throwable ignored) {
+        }
+        // 2026-11-05 PDD 8.30.0: getSelectedTab no longer exists on
+        // PddTabView (or anywhere in the app) — the reflective call above
+        // now throws on the new version. The per-frame selection and the
+        // tab-change listener do not use it, so only this initial read is
+        // affected. Fall back to the home tab: PDD launches on it, and the
+        // per-frame pass corrects the droplet within a frame if the real
+        // selection differs.
+        if (row != null) {
+            for (int i = 0; i < row.getChildCount(); i++) {
+                if (row.getChildAt(i).getVisibility() != View.GONE) {
+                    return 0;
+                }
+            }
         }
         return -1;
     }
