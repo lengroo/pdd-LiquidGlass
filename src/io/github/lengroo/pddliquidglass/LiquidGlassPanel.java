@@ -136,6 +136,14 @@ final class LiquidGlassPanel extends View {
      */
     private static final long CAPTURE_MIN_INTERVAL_MS = 50L;
     private long mLastCaptureMs;
+
+    // Gate fallback state: a page once proven to host a web leaf stays flat
+    // until it leaves the screen; while unlatched, the subtree walk re-runs
+    // on page change and every 30th frame, so lazily inflated web content
+    // is still caught without walking on every frame.
+    private View mGateLatchedPage;
+    private View mGateLastPage;
+    private int mGateFrame;
     private RuntimeShader mLens;
     private RenderEffect mChain;
     private int mChainW;
@@ -419,8 +427,11 @@ final class LiquidGlassPanel extends View {
     // native pages (FrameLayout) never flicker with the full effect. So
     // the effect runs only when no visible page is a known hybrid
     // container; on hybrid pages the pill falls back to flat wash + rim.
-    // If PDD renames the venue container in a later version, the gate
-    // misses and the flicker returns for that page — add its class here.
+    // Fallback (local, unreleased): if PDD renames the venue container,
+    // the exact name check misses, but the renamed container still hosts
+    // a real web leaf — PageGate.containsWebLeaf catches that, so the
+    // page still falls back to flat instead of flashing. The exact check
+    // stays first and runs every frame; the walk only runs when it missed.
     private void drawGlass(Canvas canvas, int w, int h, float radius,
                            RenderNode node, int[] self, float captureScale) {
         ViewGroup pager = mBackdropRef.get();
@@ -450,15 +461,52 @@ final class LiquidGlassPanel extends View {
         // chain only has to be rebuilt when that changes. Building it per frame
         // meant three native effect objects churned on every single frame.
         boolean hybrid = false;
+        View firstVisible = null;
         for (int i = 0; i < pager.getChildCount(); i++) {
             View child = pager.getChildAt(i);
             if (child.getVisibility() != View.VISIBLE) {
                 continue;
             }
-            String name = child.getClass().getName();
-            if (name.contains("TouchEventInterceptView")
-                    || name.contains("WebView")) {
+            if (firstVisible == null) {
+                firstVisible = child;
+            }
+            if (PageGate.exactHybridName(child.getClass().getName())) {
                 hybrid = true;
+            }
+        }
+        if (!hybrid && firstVisible != null) {
+            // Fallback, only when the exact names missed: a renamed hybrid
+            // container still hosts a web leaf. A latched page stays flat
+            // until it leaves the screen; otherwise re-walk on page change
+            // and every 30th frame, so lazily inflated web content is caught
+            // without paying for a subtree walk on every frame.
+            boolean latchedVisible = false;
+            for (int i = 0; i < pager.getChildCount(); i++) {
+                if (pager.getChildAt(i) == mGateLatchedPage
+                        && pager.getChildAt(i).getVisibility() == View.VISIBLE) {
+                    latchedVisible = true;
+                    break;
+                }
+            }
+            if (latchedVisible) {
+                hybrid = true;
+            } else {
+                mGateLatchedPage = null;
+                mGateFrame++;
+                if (firstVisible != mGateLastPage || mGateFrame % 30 == 0) {
+                    for (int i = 0; i < pager.getChildCount(); i++) {
+                        View child = pager.getChildAt(i);
+                        if (child.getVisibility() != View.VISIBLE) {
+                            continue;
+                        }
+                        if (PageGate.containsWebLeaf(child)) {
+                            hybrid = true;
+                            mGateLatchedPage = child;
+                            break;
+                        }
+                    }
+                    mGateLastPage = firstVisible;
+                }
             }
         }
         if (hybrid) {
