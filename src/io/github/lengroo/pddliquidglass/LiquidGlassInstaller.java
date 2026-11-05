@@ -1948,10 +1948,22 @@ final class LiquidGlassInstaller {
             if (c.getHeight() > 0 && c.getHeight() <= maxThickness
                     && c.getWidth() >= parent.getWidth() * 0.9f
                     && c.getBackground() != null) {
-                c.setVisibility(View.GONE);
-                sHairlineRef = new WeakReference<>(c);
-                LiquidGlassModule.log(android.util.Log.INFO,
-                        "hid the bar's " + c.getHeight() + "px hairline");
+                // 2026-11-05 home-back fix: PDD's exit branch needs this
+                // divider present at back-press time, and the per-frame
+                // holdHidden(sHairlineRef) would re-hide any tracked
+                // divider — so for PDD the divider is made fully
+                // transparent instead of GONE, and deliberately NOT
+                // tracked, leaving no stray line and a working back key.
+                if (LiquidGlassModule.app() == HostApp.PDD) {
+                    c.setAlpha(0f);
+                    LiquidGlassModule.log(android.util.Log.INFO,
+                            "hairline transparent, " + c.getHeight() + "px");
+                } else {
+                    c.setVisibility(View.GONE);
+                    sHairlineRef = new WeakReference<>(c);
+                    LiquidGlassModule.log(android.util.Log.INFO,
+                            "hid the bar's " + c.getHeight() + "px hairline");
+                }
             }
         }
     }
