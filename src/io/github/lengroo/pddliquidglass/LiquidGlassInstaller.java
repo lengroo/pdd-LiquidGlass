@@ -4,11 +4,13 @@ import android.app.Activity;
 import android.content.Context;
 import android.graphics.drawable.ColorDrawable;
 import android.os.Build;
+import android.os.SystemClock;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewTreeObserver;
 import android.view.WindowInsets;
 import android.widget.FrameLayout;
+import android.widget.TextView;
 
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Method;
@@ -982,6 +984,31 @@ final class LiquidGlassInstaller {
     private static int sPddExpandFrame;
     private static final int MAX_TRACKED_SCROLLERS = 16;
 
+    /**
+     * Back-to-top button lift (PDD home feed).
+     *
+     * <p>PDD shows a floating 回顶部 button once the home feed is scrolled down. In stock PDD it
+     * sits just above the native bar — exactly where our pill floats — so without a lift it ends
+     * up hidden behind the pill. The per-frame path finds the button, remembers its resting
+     * translation, and raises it just enough that its bottom clears the pill top.
+     *
+     * <p>The lift is computed from the button's UNTRANSLATED bottom: deriving it from the drawn
+     * position instead would flip the translation back to rest on the next frame and make the
+     * button oscillate. When the button leaves the screen or is detached, its translation is
+     * restored and the reference dropped.
+     */
+    private static WeakReference<View> sBackTopRef = new WeakReference<>(null);
+    private static float sBackTopBaseTranslationY;
+    private static boolean sBackTopHasBase;
+    private static long sBackTopLastProbeMs;
+    private static boolean sBackTopLogged;
+    private static final long BACK_TOP_PROBE_MS = 120L;
+    private static final int BACK_TOP_MIN_DP = 34;
+    private static final int BACK_TOP_MAX_DP = 112;
+    private static final int BACK_TOP_GAP_DP = 8;
+    private static final int BACK_TOP_MAX_DEPTH = 14;
+    private static final int BACK_TOP_MAX_NODES = 1200;
+
     /** Re-asserts the scroll padding and the clipping flag on every frame. */
     private static void maintainScrollerPadding() {
         // A 0 pad is a real target now (PDD's feed expand),
@@ -1032,6 +1059,188 @@ final class LiquidGlassInstaller {
             sPaddedScrollers.remove(0);
         }
         sPaddedScrollers.add(new WeakReference<>(scroller));
+    }
+
+    /** Lifts PDD's floating back-to-top button above the pill; no-op on other hosts. */
+    private static void liftBackToTopButton(LiquidGlassHostLayout host) {
+        if (LiquidGlassModule.app() != HostApp.PDD) {
+            return;
+        }
+        if (host == null || !host.isAttachedToWindow() || host.getWidth() <= 0) {
+            return;
+        }
+        View target = sBackTopRef.get();
+        if (target == null || !target.isAttachedToWindow() || !target.isShown()) {
+            if (target != null) {
+                restoreBackTop(target);
+                sBackTopRef = new WeakReference<>(null);
+            }
+            long now = SystemClock.uptimeMillis();
+            if (now - sBackTopLastProbeMs < BACK_TOP_PROBE_MS) {
+                return;
+            }
+            sBackTopLastProbeMs = now;
+            View root = host.getRootView();
+            if (!(root instanceof ViewGroup)) {
+                return;
+            }
+            float density = host.getResources().getDisplayMetrics().density;
+            host.getLocationOnScreen(sLoc);
+            int pillTop = sLoc[1];
+            target = findBackToTopButton((ViewGroup) root, density, pillTop, root.getWidth());
+            if (target == null) {
+                return;
+            }
+            sBackTopRef = new WeakReference<>(target);
+            sBackTopHasBase = false;
+            if (!sBackTopLogged) {
+                sBackTopLogged = true;
+                LiquidGlassModule.log(android.util.Log.INFO,
+                        "pdd back-to-top found: " + target.getClass().getName()
+                                + " " + target.getWidth() + "x" + target.getHeight());
+            }
+        }
+        if (!sBackTopHasBase) {
+            sBackTopBaseTranslationY = target.getTranslationY();
+            sBackTopHasBase = true;
+        }
+        float density = host.getResources().getDisplayMetrics().density;
+        host.getLocationOnScreen(sLoc);
+        int desiredBottom = sLoc[1] - Math.round(BACK_TOP_GAP_DP * density);
+        target.getLocationOnScreen(sLoc);
+        int drawnBottom = sLoc[1] + target.getHeight();
+        // Untranslated bottom: the drawn position already includes our lift.
+        int naturalBottom = drawnBottom
+                - Math.round(target.getTranslationY() - sBackTopBaseTranslationY);
+        float lift = Math.max(0, naturalBottom - desiredBottom);
+        target.setTranslationY(sBackTopBaseTranslationY - lift);
+    }
+
+    private static void restoreBackTop(View target) {
+        if (target == null || !sBackTopHasBase) {
+            return;
+        }
+        try {
+            target.setTranslationY(sBackTopBaseTranslationY);
+        } catch (Throwable ignored) {
+        }
+        sBackTopHasBase = false;
+    }
+
+    /**
+     * Finds PDD's floating back-to-top button under {@code root}.
+     *
+     * <p>First pass matches the button's own label/id ("回顶部", "顶部", "to_top", "back_top",
+     * "backtop") and uses the clickable ancestor that carries the touch target. Only if nothing
+     * is labelled, a second pass accepts a small square clickable view in the bottom-right that
+     * would overlap the pill. The walk is bounded (depth and node caps) so the probe stays
+     * cheap enough for the UI thread.
+     */
+    private static View findBackToTopButton(ViewGroup root, float density, int pillTop,
+            int rootWidth) {
+        int minPx = Math.round(BACK_TOP_MIN_DP * density);
+        int maxPx = Math.round(BACK_TOP_MAX_DP * density);
+        int[] count = new int[1];
+        View labelled = findBackToTopButton(root, 0, minPx, maxPx, pillTop, rootWidth, count,
+                false);
+        if (labelled != null) {
+            return labelled;
+        }
+        count[0] = 0;
+        return findBackToTopButton(root, 0, minPx, maxPx, pillTop, rootWidth, count, true);
+    }
+
+    private static View findBackToTopButton(ViewGroup group, int depth, int minPx, int maxPx,
+            int pillTop, int rootWidth, int[] count, boolean fallback) {
+        if (group == null || depth > BACK_TOP_MAX_DEPTH || count[0] > BACK_TOP_MAX_NODES) {
+            return null;
+        }
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            if (child == null || !child.isShown()) {
+                continue;
+            }
+            count[0]++;
+            if (count[0] > BACK_TOP_MAX_NODES) {
+                return null;
+            }
+            if (child == sHostRef.get() || child == sTabViewRef.get()) {
+                continue;
+            }
+            if (!fallback) {
+                View hit = backTopTargetFrom(child, minPx, maxPx);
+                if (hit != null) {
+                    return hit;
+                }
+            } else if (child.isClickable() && child.getWidth() >= minPx
+                    && child.getWidth() <= maxPx && child.getHeight() >= minPx
+                    && child.getHeight() <= maxPx) {
+                child.getLocationOnScreen(sLoc);
+                int centerX = sLoc[0] + child.getWidth() / 2;
+                int bottom = sLoc[1] + child.getHeight();
+                if (centerX >= rootWidth * 0.72f && bottom > pillTop
+                        && Math.abs(child.getWidth() - child.getHeight()) <= maxPx / 2) {
+                    return child;
+                }
+            }
+            if (child instanceof ViewGroup) {
+                View found = findBackToTopButton((ViewGroup) child, depth + 1, minPx, maxPx,
+                        pillTop, rootWidth, count, fallback);
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
+        return null;
+    }
+
+    /** Returns the clickable sized ancestor of a back-to-top-labelled view, or null. */
+    private static View backTopTargetFrom(View view, int minPx, int maxPx) {
+        if (!matchesBackTopLabel(view)) {
+            return null;
+        }
+        View current = view;
+        for (int i = 0; i < 5 && current != null; i++) {
+            if (current.isClickable() && current.getWidth() >= minPx
+                    && current.getWidth() <= maxPx && current.getHeight() >= minPx
+                    && current.getHeight() <= maxPx) {
+                return current;
+            }
+            android.view.ViewParent parent = current.getParent();
+            current = (parent instanceof View) ? (View) parent : null;
+        }
+        return null;
+    }
+
+    private static boolean matchesBackTopLabel(View view) {
+        CharSequence label = null;
+        if (view instanceof TextView) {
+            label = ((TextView) view).getText();
+        }
+        if (label == null || label.length() == 0) {
+            label = view.getContentDescription();
+        }
+        if (label != null) {
+            String text = label.toString();
+            if (text.contains("回顶部") || text.contains("顶部")) {
+                return true;
+            }
+        }
+        String idName = null;
+        try {
+            if (view.getId() != View.NO_ID) {
+                idName = view.getResources().getResourceEntryName(view.getId());
+            }
+        } catch (Throwable ignored) {
+        }
+        if (idName != null) {
+            String lower = idName.toLowerCase(java.util.Locale.ROOT);
+            if (lower.contains("back_top") || lower.contains("backtop")
+                    || lower.contains("to_top")) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**
@@ -1987,6 +2196,9 @@ final class LiquidGlassInstaller {
                 // has gone back to clipping its padding paints an opaque band
                 // over the content it is scrolling.
                 maintainScrollerPadding();
+                // PDD's floating back-to-top button sits where the pill floats;
+                // lift it above the pill so it stays visible and tappable.
+                liftBackToTopButton(host);
                 // The feed RecyclerView may be created after install (PDD
                 // loads it asynchronously), so re-run the whole PDD expand
                 // (stretch + pad) every 5th frame (~80ms) until it is

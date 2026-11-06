@@ -45,10 +45,24 @@ java -cp "$BT/lib/d8.jar" com.android.tools.r8.D8 \
 
 echo "[3/7] aapt2 compile/link"
 "$BT/aapt2" compile --dir "$PROJ/res" -o "$OUT/res.zip"
+# No-UI variant: the launcher About Activity lives in MainActivity.kt,
+# which this Java-only build does not compile, so the manifest used here
+# must not declare it (a launcher entry for a missing class would crash
+# on tap). Derive it from the main manifest by stripping the <activity>
+# block; the version still comes from the main manifest, so there is a
+# single source of truth.
+python3 - "$PROJ/AndroidManifest.xml" "$OUT/AndroidManifest-noui.xml" <<'PYNOUI'
+import re, sys
+src, dst = sys.argv[1:3]
+text = open(src, encoding='utf-8').read()
+stripped, n = re.subn(r'[ \t]*<activity\b.*?</activity>\n?', '', text, flags=re.DOTALL)
+assert n == 1, f"expected exactly 1 <activity> block, found {n}"
+open(dst, 'w', encoding='utf-8').write(stripped)
+PYNOUI
 "$BT/aapt2" link \
     -o "$OUT/base.apk" \
     -I "$PLATFORM" \
-    --manifest "$PROJ/AndroidManifest.xml" \
+    --manifest "$OUT/AndroidManifest-noui.xml" \
     "$OUT/res.zip"
 
 echo "[4/7] inject classes.dex + META-INF/xposed"
@@ -94,7 +108,7 @@ else
     fi
     SIGN_ARGS=(--ks "$KS" --ks-pass pass:android --key-pass pass:android)
 fi
-FINAL="$PROJ/LiquidGlass-v$VERSION.apk"
+FINAL="$PROJ/PddLG-v$VERSION-noui.apk"
 java -cp "$BT/lib/apksigner.jar" com.android.apksigner.ApkSignerTool sign \
     "${SIGN_ARGS[@]}" --out "$FINAL" "$OUT/aligned.apk"
 

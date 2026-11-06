@@ -421,12 +421,20 @@ final class LiquidGlassPanel extends View {
     }
 
     // 1.0.11 fix: effect gating by visible page type. Diag3/4/5 proved that
-    // ANY RenderEffect on the glass node makes PDD's hybrid venue page
+    // ANY RenderEffect over a live capture makes PDD's hybrid venue page
     // (TouchEventInterceptView) flash white — blur alone and lens alone
     // both trigger it — while capture alone and no effect never do, and
     // native pages (FrameLayout) never flicker with the full effect. So
     // the effect runs only when no visible page is a known hybrid
     // container; on hybrid pages the pill falls back to flat wash + rim.
+    // A static bitmap snapshot was tried (1.0.17-liquidtab) to give the
+    // venue pill a blurred look without a live reference, but replaying the
+    // WebView's display list into a software bitmap forced a synchronous
+    // software raster: the page flashed on touch-down and the capture stalled
+    // the UI thread, lengthening the tab-switch black bar. Reverted; a true
+    // glass look on the venue page would need a PixelCopy of the composited
+    // frame plus a separate surface for the pill (LiquidTab's approach) —
+    // a much bigger change, not attempted here.
     // Fallback (local, unreleased): if PDD renames the venue container,
     // the exact name check misses, but the renamed container still hosts
     // a real web leaf — PageGate.containsWebLeaf catches that, so the
@@ -457,58 +465,11 @@ final class LiquidGlassPanel extends View {
             node.endRecording();
         }
 
+        boolean hybrid = isHybridPage(pager);
+
         // Every uniform here is a function of the pill's size, so the whole
         // chain only has to be rebuilt when that changes. Building it per frame
         // meant three native effect objects churned on every single frame.
-        boolean hybrid = false;
-        View firstVisible = null;
-        for (int i = 0; i < pager.getChildCount(); i++) {
-            View child = pager.getChildAt(i);
-            if (child.getVisibility() != View.VISIBLE) {
-                continue;
-            }
-            if (firstVisible == null) {
-                firstVisible = child;
-            }
-            if (PageGate.exactHybridName(child.getClass().getName())) {
-                hybrid = true;
-            }
-        }
-        if (!hybrid && firstVisible != null) {
-            // Fallback, only when the exact names missed: a renamed hybrid
-            // container still hosts a web leaf. A latched page stays flat
-            // until it leaves the screen; otherwise re-walk on page change
-            // and every 30th frame, so lazily inflated web content is caught
-            // without paying for a subtree walk on every frame.
-            boolean latchedVisible = false;
-            for (int i = 0; i < pager.getChildCount(); i++) {
-                if (pager.getChildAt(i) == mGateLatchedPage
-                        && pager.getChildAt(i).getVisibility() == View.VISIBLE) {
-                    latchedVisible = true;
-                    break;
-                }
-            }
-            if (latchedVisible) {
-                hybrid = true;
-            } else {
-                mGateLatchedPage = null;
-                mGateFrame++;
-                if (firstVisible != mGateLastPage || mGateFrame % 30 == 0) {
-                    for (int i = 0; i < pager.getChildCount(); i++) {
-                        View child = pager.getChildAt(i);
-                        if (child.getVisibility() != View.VISIBLE) {
-                            continue;
-                        }
-                        if (PageGate.containsWebLeaf(child)) {
-                            hybrid = true;
-                            mGateLatchedPage = child;
-                            break;
-                        }
-                    }
-                    mGateLastPage = firstVisible;
-                }
-            }
-        }
         if (hybrid) {
             // Flat wash + rim only; any RenderEffect here flashes the page.
             node.setRenderEffect(null);
@@ -541,5 +502,62 @@ final class LiquidGlassPanel extends View {
         canvas.translate(-mPad, -mPad);
         canvas.drawRenderNode(node);
         canvas.restore();
+    }
+
+    /**
+     * Whether a visible page is a hybrid (web) page, on which any RenderEffect
+     * over a live capture flashes the page white.
+     *
+     * <p>Exact class-name match first (cheap, every frame); the web-leaf walk
+     * only runs when it missed, on page change and every 30th frame, so lazily
+     * inflated web content is caught without walking on every frame. A page
+     * once proven to host a web leaf stays latched until it leaves the screen.
+     */
+    private boolean isHybridPage(ViewGroup pager) {
+        boolean hybrid = false;
+        View firstVisible = null;
+        for (int i = 0; i < pager.getChildCount(); i++) {
+            View child = pager.getChildAt(i);
+            if (child.getVisibility() != View.VISIBLE) {
+                continue;
+            }
+            if (firstVisible == null) {
+                firstVisible = child;
+            }
+            if (PageGate.exactHybridName(child.getClass().getName())) {
+                hybrid = true;
+            }
+        }
+        if (!hybrid && firstVisible != null) {
+            boolean latchedVisible = false;
+            for (int i = 0; i < pager.getChildCount(); i++) {
+                if (pager.getChildAt(i) == mGateLatchedPage
+                        && pager.getChildAt(i).getVisibility() == View.VISIBLE) {
+                    latchedVisible = true;
+                    break;
+                }
+            }
+            if (latchedVisible) {
+                hybrid = true;
+            } else {
+                mGateLatchedPage = null;
+                mGateFrame++;
+                if (firstVisible != mGateLastPage || mGateFrame % 30 == 0) {
+                    for (int i = 0; i < pager.getChildCount(); i++) {
+                        View child = pager.getChildAt(i);
+                        if (child.getVisibility() != View.VISIBLE) {
+                            continue;
+                        }
+                        if (PageGate.containsWebLeaf(child)) {
+                            hybrid = true;
+                            mGateLatchedPage = child;
+                            break;
+                        }
+                    }
+                    mGateLastPage = firstVisible;
+                }
+            }
+        }
+        return hybrid;
     }
 }

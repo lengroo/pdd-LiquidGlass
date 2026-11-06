@@ -1,4 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">拼多多液态玻璃</string>
+    <string name="app_name">PddLG</string>
+    <string name="about_title">关于</string>
+    <string name="about_github">在 GitHub 查看源码</string>
+    <string name="about_github_summary">github.com/lengroo/pdd-LiquidGlass</string>
+    <string name="about_telegram">加入我们的 Telegram 频道</string>
+    <string name="about_telegram_summary">t.me/fengjimmm</string>
 </resources>
