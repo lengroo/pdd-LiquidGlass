@@ -3,6 +3,7 @@
 为拼多多打造的 iOS 26 风格液态玻璃底部导航栏 · LSPosed 模块（libxposed API 102）
 
 > 当前版本：v1.0.19，APK 见 [Releases](https://github.com/lengroo/pdd-LiquidGlass/releases)。
+> 本项目：[lengroo/pdd-LiquidGlass](https://github.com/lengroo/pdd-LiquidGlass)
 > 已上架 LSPosed 官方仓库：[Xposed-Modules-Repo/io.github.lengroo.pddlg](https://github.com/Xposed-Modules-Repo/io.github.lengroo.pddlg)
 
 ## ✨ 特性
