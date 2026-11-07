@@ -133,12 +133,23 @@ with zipfile.ZipFile(apk, 'a') as z:
                     compress_type=zipfile.ZIP_DEFLATED)
 PY
 "$ZIPALIGN" -f 4 "$OUT/work/unsigned.apk" "$OUT/work/aligned.apk"
-KS="${KEYSTORE:-$HOME/workspace/study/example/build-manual/debug.keystore}"
+# Release signing: the release keystore is the default (since 1.0.18, the
+# debug key is no longer used for releases). Override with KEYSTORE /
+# KEYSTORE_PASS / KEY_ALIAS. The password is never stored in this file
+# (it is public); it comes from KEYSTORE_PASS or from
+# ~/workspace/keystores/pddlg-release.pass.
+KS="${KEYSTORE:-$HOME/workspace/keystores/pddlg-release.keystore}"
 [ -f "$KS" ] || { echo "keystore not found: $KS" >&2; exit 1; }
-KS_PASS="${KEYSTORE_PASS:-android}"
+if [ -n "${KEYSTORE_PASS:-}" ]; then
+    KS_PASS="$KEYSTORE_PASS"
+elif [ -f "$HOME/workspace/keystores/pddlg-release.pass" ]; then
+    KS_PASS="$(cat "$HOME/workspace/keystores/pddlg-release.pass")"
+else
+    echo "KEYSTORE_PASS is not set and no pass file found" >&2; exit 1
+fi
 KEY_PASS="${KEY_PASS:-$KS_PASS}"
-SIGN_ARGS=(--ks "$KS" --ks-pass "pass:$KS_PASS" --key-pass "pass:$KEY_PASS")
-[ -n "${KEY_ALIAS:-}" ] && SIGN_ARGS+=(--ks-key-alias "$KEY_ALIAS")
+KEY_ALIAS_FINAL="${KEY_ALIAS:-pddlg}"
+SIGN_ARGS=(--ks "$KS" --ks-pass "pass:$KS_PASS" --key-pass "pass:$KEY_PASS" --ks-key-alias "$KEY_ALIAS_FINAL")
 FINAL="$PROJECT_DIR/PddLG-v$VERSION.apk"
 "$APKSIGNER" sign "${SIGN_ARGS[@]}" --out "$FINAL" "$OUT/work/aligned.apk"
 "$APKSIGNER" verify --print-certs "$FINAL" | head -3
