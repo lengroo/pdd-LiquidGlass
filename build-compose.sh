@@ -86,7 +86,7 @@ CP="$CP$ANDROID_JAR:$XAPI:$HOME/tools/kotlinc/lib/kotlin-stdlib.jar:$OUT/work/cl
   -Xplugin="$HOME/tools/kotlinc/lib/compose-compiler-plugin.jar" \
   -P plugin:androidx.compose.compiler.plugins.kotlin:generateFunctionKeyMetaAnnotations=true \
   -cp "$CP" -d "$OUT/classes" \
-  "$PROJECT_DIR/src/io/github/lengroo/pddliquidglass/"*.kt
+  "$PROJECT_DIR/src/io/github/lengroo/pddlg/"*.kt
 
 echo "== 4. Compile Java module sources =="
 find "$PROJECT_DIR/src" -name '*.java' > "$OUT/work/java-sources.txt"
