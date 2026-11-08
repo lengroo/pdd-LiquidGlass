@@ -47,6 +47,17 @@ final class LiquidGlassInstaller {
     private static final int[] sPos = new int[2];
     private static boolean sKeepFailed;
     private static WeakReference<Activity> sActivityRef = new WeakReference<>(null);
+    /**
+     * Where the stock tab bar lived before install re-parented it into the
+     * host: its original parent, index and LayoutParams. Hot reload hands
+     * the bar back to exactly this spot so the new generation can install
+     * cleanly; without the original LayoutParams the bar would lose its
+     * ALIGN_PARENT_BOTTOM rule and stop anchoring to the bottom.
+     */
+    private static WeakReference<ViewGroup> sOriginalParentRef =
+            new WeakReference<>(null);
+    private static int sOriginalIndex = -1;
+    private static ViewGroup.LayoutParams sOriginalTabLp;
     private static WeakReference<LiquidGlassHostLayout> sHostRef = new WeakReference<>(null);
     private static WeakReference<View> sDropletRef = new WeakReference<>(null);
     private static WeakReference<ViewGroup> sTabRowRef = new WeakReference<>(null);
@@ -67,6 +78,15 @@ final class LiquidGlassInstaller {
     private static final long TAB_ROW_EMPTY_GIVE_UP_MS = 2000L;
     /** Content height established during install, before QQ's navigation reserve. */
     private static int sBarHeight;
+    /**
+     * Config values the live pill was built with, or -1 before the first
+     * install. The tuning UI changes GlassConfig on the next home onResume;
+     * when these differ from it, the pill is re-applied in place instead
+     * of waiting for a reinstall.
+     */
+    private static int sAppliedBarOffsetDp = -1;
+    private static int sAppliedPillExtraHeightDp = -1;
+    private static int sAppliedPillSideInsetDp = -1;
     /**
      * Last real navigation-bar inset seen before our edge-to-edge listener
      * strips it from the app's view tree. Kept across Activity recreation: QQ
@@ -176,6 +196,12 @@ final class LiquidGlassInstaller {
                 // Nothing to install, but coming back from a chat or any other
                 // screen rebuilds the window state: the navigation inset is
                 // applied again and the dead strip at the bottom re-opens.
+                // A tuning change also lands here: GlassConfig.load() already
+                // ran on this resume, so re-apply the new offset/height in
+                // place instead of waiting for a reinstall.
+                if (configChanged()) {
+                    reapplyTunedConfig();
+                }
                 reassertBottom(activity);
                 return;
             }
@@ -282,6 +308,9 @@ final class LiquidGlassInstaller {
     /** Drops references to a previous Activity's views so a relaunch reinstalls. */
     private static void resetState() {
         sHostRef = new WeakReference<>(null);
+        sOriginalParentRef = new WeakReference<>(null);
+        sOriginalIndex = -1;
+        sOriginalTabLp = null;
         sTabViewRef = new WeakReference<>(null);
         sGlassRef = new WeakReference<>(null);
         sDropletRef = new WeakReference<>(null);
@@ -292,6 +321,9 @@ final class LiquidGlassInstaller {
         sTabStructureRefreshPosted = false;
         sTabRowEmptySinceMs = 0L;
         sBarHeight = 0;
+        sAppliedBarOffsetDp = -1;
+        sAppliedPillExtraHeightDp = -1;
+        sAppliedPillSideInsetDp = -1;
         sBlurLayerRef = new WeakReference<>(null);
         sHairlineRef = new WeakReference<>(null);
         sNavBgRef = new WeakReference<>(null);
@@ -316,6 +348,73 @@ final class LiquidGlassInstaller {
      */
     static ViewGroup currentPager() {
         return sPagerRef.get();
+    }
+
+    /** The Activity the pill is installed in, or null if none is live. */
+    static Activity currentActivity() {
+        return sActivityRef.get();
+    }
+
+    /** Whether the pill is currently installed in a live window. */
+    static boolean hasLivePill() {
+        LiquidGlassHostLayout host = sHostRef.get();
+        return host != null && host.isAttachedToWindow();
+    }
+
+    /** Selected tab slot the pill is showing, or -1 before the first frame. */
+    static int lastSelectedIndex() {
+        return sLastIndex;
+    }
+
+    /**
+     * Hot reload teardown (API 102): hands the stock tab bar back to its
+     * original parent and drops every reference, so the new generation can
+     * install cleanly into the same live Activity.
+     *
+     * <p>The pill itself cannot be handed over: its view classes belong to
+     * this generation's ClassLoader, and the new generation loads its own
+     * copies, so a live host from here would be a ClassCastException there.
+     * Removing it is also what fires the host's own detach (its pre-draw
+     * listener and theme probe), and the installer's per-frame watcher goes
+     * quiet through its guard once resetState drops the host reference —
+     * the dead listener itself stays registered on the window observer and
+     * is a known cleanup item, as are the backdrop layout listener and the
+     * tab listener proxy the old generation left on the bar (both no-ops
+     * against the cleared statics, and tab tracking survives through the
+     * per-frame poll). The drag controller's frame loop is self-terminating
+     * once its springs settle.
+     *
+     * <p>Best effort throughout: a half-torn-down pill is still better than
+     * refusing the reload and stranding the user on old code, and the new
+     * generation's install guards (already-installed host, missing bar
+     * retries) cover the rest.
+     */
+    static void teardownForHotReload() {
+        LiquidGlassHostLayout host = sHostRef.get();
+        View tabView = sTabViewRef.get();
+        ViewGroup origParent = sOriginalParentRef.get();
+        try {
+            if (host != null && tabView != null && origParent != null) {
+                restoreAfterFailedReparent(
+                        origParent, tabView, host, sOriginalIndex, sOriginalTabLp);
+                LiquidGlassModule.log(android.util.Log.INFO,
+                        "hot reload: pill removed, stock bar restored to "
+                                + origParent.getClass().getSimpleName());
+            } else if (host != null && host.getParent() instanceof ViewGroup) {
+                // Original spot unknown (install predates the bookkeeping):
+                // at least get the old pill out of the window.
+                ((ViewGroup) host.getParent()).removeView(host);
+                LiquidGlassModule.log(android.util.Log.WARN,
+                        "hot reload: original bar spot unknown, host removed only");
+            } else {
+                LiquidGlassModule.log(android.util.Log.INFO,
+                        "hot reload: no live pill to tear down");
+            }
+        } catch (Throwable t) {
+            LiquidGlassModule.logErr("hot reload teardown failed", t);
+        } finally {
+            resetState();
+        }
     }
 
     private static void install(ViewGroup tabView) {
@@ -426,6 +525,12 @@ final class LiquidGlassInstaller {
                 barHeight > 0 ? barHeight : ViewGroup.LayoutParams.WRAP_CONTENT,
                 android.view.Gravity.TOP | android.view.Gravity.FILL_HORIZONTAL);
 
+        // Remember where the stock bar came from, so a hot reload (or any
+        // teardown) can hand it back to exactly this spot.
+        sOriginalParentRef = new WeakReference<>(parent);
+        sOriginalIndex = index;
+        sOriginalTabLp = originalLp;
+
         // The native bar must never be left detached. All potentially failing
         // setup above runs while it still belongs to the app; this small
         // structural transaction either installs both levels or puts the bar
@@ -472,8 +577,7 @@ final class LiquidGlassInstaller {
                 if (parent.getWidth() > 0) {
                     desired = Math.min(desired, parent.getWidth());
                 }
-                hostLp.width = desired;
-                host.setLayoutParams(hostLp);
+                setHostWidthCentered(host, desired);
             }
         } catch (Throwable t) {
             try {
@@ -498,6 +602,9 @@ final class LiquidGlassInstaller {
         sTabStructureRefreshPosted = false;
         sPagerRef = new WeakReference<>(backdrop);
         sBarHeight = barHeight;
+        sAppliedBarOffsetDp = GlassConfig.barOffsetDp;
+        sAppliedPillExtraHeightDp = GlassConfig.pillExtraHeightDp;
+        sAppliedPillSideInsetDp = GlassConfig.pillSideInsetDp;
         sLastIndex = -1;
 
         TabBarBridge.tryHookPager(backdrop);
@@ -1657,6 +1764,50 @@ final class LiquidGlassInstaller {
      * row is {@code IntrinsicSize.Min} and every tab shares the widest column's
      * width.
      */
+    /**
+     * Sets the host to a fixed width and centres it horizontally.
+     *
+     * <p>The width comes from hugContentWidth (the content-hugging width).
+     * Centring is explicit: a fixed-width child in a RelativeLayout with
+     * only side margins is left-aligned, not centred — the margins shift
+     * it instead of narrowing it, which is why the margin approach put
+     * the pill off to one side. A FrameLayout parent centres through the
+     * gravity already on its params.
+     */
+    private static void setHostWidthCentered(LiquidGlassHostLayout host, int widthPx) {
+        ViewGroup.LayoutParams lp = host.getLayoutParams();
+        if (lp == null) {
+            return;
+        }
+        boolean changed = false;
+        if (lp.width != widthPx) {
+            lp.width = widthPx;
+            changed = true;
+        }
+        if (lp instanceof android.widget.RelativeLayout.LayoutParams) {
+            android.widget.RelativeLayout.LayoutParams rlp =
+                    (android.widget.RelativeLayout.LayoutParams) lp;
+            int[] rules = rlp.getRules();
+            if (rules[android.widget.RelativeLayout.CENTER_HORIZONTAL] == 0) {
+                rlp.addRule(android.widget.RelativeLayout.CENTER_HORIZONTAL);
+                changed = true;
+            }
+            // A left/right anchor fights the centring rule; the bar is
+            // full-width so it carries none, but drop them if they appear.
+            if (rules[android.widget.RelativeLayout.ALIGN_PARENT_LEFT] != 0) {
+                rlp.removeRule(android.widget.RelativeLayout.ALIGN_PARENT_LEFT);
+                changed = true;
+            }
+            if (rules[android.widget.RelativeLayout.ALIGN_PARENT_RIGHT] != 0) {
+                rlp.removeRule(android.widget.RelativeLayout.ALIGN_PARENT_RIGHT);
+                changed = true;
+            }
+        }
+        if (changed) {
+            host.setLayoutParams(lp);
+        }
+    }
+
     private static int hugContentWidth(ViewGroup tabRow, float density) {
         if (tabRow == null || tabRow.getChildCount() == 0) {
             return 0;
@@ -1709,6 +1860,13 @@ final class LiquidGlassInstaller {
         int tabWidth = widest + Math.round(density * 32f);
         int screen = tabRow.getResources().getDisplayMetrics().widthPixels;
         int maxTotal = screen - Math.round(density * 24f);
+        // The side inset narrows the pill, so the tabs get that much less
+        // room. Without this the tabs keep their full-width size and
+        // overflow the narrower pill, sticking out past its edges — the
+        // margin approach cannot fix that, because hugContentWidth pins
+        // each tab to a fixed width (weight 0) here.
+        int sideInsetPx = Math.round(density * GlassConfig.pillSideInsetDp);
+        maxTotal -= sideInsetPx * 2;
         if (tabWidth * count + pad * 2 > maxTotal) {
             tabWidth = (maxTotal - pad * 2) / count;
         }
@@ -2086,17 +2244,13 @@ final class LiquidGlassInstaller {
             if (barWidth <= 0) {
                 return; // not laid out yet; leave the old signature so we retry
             }
-            ViewGroup.LayoutParams lp = host.getLayoutParams();
             int desired = barWidth + host.shadowPad() * 2;
             if (host.getParent() instanceof View
                     && ((View) host.getParent()).getWidth() > 0) {
                 desired = Math.min(desired,
                         ((View) host.getParent()).getWidth());
             }
-            if (lp != null && lp.width != desired) {
-                lp.width = desired;
-                host.setLayoutParams(lp);
-            }
+            setHostWidthCentered(host, desired);
 
             sTabRowRef = new WeakReference<>(tabRow);
             sTabStructureSignature = tabStructureSignature(tabRow);
@@ -2129,7 +2283,7 @@ final class LiquidGlassInstaller {
             LiquidGlassModule.log(android.util.Log.INFO,
                     "tab structure rebound: row=" + tabRow.getClass().getName()
                             + " children=" + tabRow.getChildCount()
-                            + " hostWidth=" + (lp == null ? 0 : lp.width)
+                            + " hostWidth=" + host.getWidth()
                             + " barHeight=" + sBarHeight);
         } catch (Throwable t) {
             LiquidGlassModule.logErr("tab structure refresh failed", t);
@@ -2163,6 +2317,117 @@ final class LiquidGlassInstaller {
                             + sBarHeight);
         }
         return changed;
+    }
+
+    /** True when the tuning UI changed a value since the pill was installed. */
+    private static boolean configChanged() {
+        return sAppliedBarOffsetDp != -1
+                && (GlassConfig.barOffsetDp != sAppliedBarOffsetDp
+                        || GlassConfig.pillExtraHeightDp != sAppliedPillExtraHeightDp
+                        || GlassConfig.pillSideInsetDp != sAppliedPillSideInsetDp);
+    }
+
+    /**
+     * Re-applies barOffsetDp / pillExtraHeightDp / pillSideInsetDp to a live
+     * pill after the user changes them in the About tuning UI. Runs on the
+     * already-installed path of tryInstall, right after GlassConfig.load()
+     * refreshed the values on home onResume — no reinstall, no force-stop.
+     *
+     * <p>The pill height is linear in the extra height (barHeight is the
+     * measured tab content plus the extra), so the height moves by the
+     * pixel delta between the old and new extra; the tabs are then
+     * re-centred in the new height the same way install does. The
+     * per-frame restoreBarContentHeight enforces the new sBarHeight from
+     * here on. The bottom offset is set directly on the host's
+     * MarginLayoutParams (see the note in step 1). The side inset narrows
+     * the pill through a re-hug: hugContentWidth reserves the inset from
+     * the room the tabs may use, so the tabs shrink to fit, and the host
+     * is re-centred on its new width — side margins on a fixed-width
+     * child only shift it, and the tabs keep their fixed widths.
+     */
+    private static void reapplyTunedConfig() {
+        LiquidGlassHostLayout host = sHostRef.get();
+        View tabView = sTabViewRef.get();
+        if (host == null || tabView == null || !host.isAttachedToWindow()) {
+            return;
+        }
+        Context ctx = tabView.getContext();
+        float density = ctx.getResources().getDisplayMetrics().density;
+        // 1. barOffsetDp -> host bottom margin. Do NOT use
+        // syncHostBottomInset here: it only handles FrameLayout.LayoutParams,
+        // and PDD's parent is a RelativeLayout, so the host carries
+        // RelativeLayout.LayoutParams and that call is a no-op — which is
+        // why the offset only moved after a restart. Set the margin
+        // directly, with the same formula install uses for PDD
+        // (bottomOffset - shadowPad, no navigation inset: PDD manages its
+        // own insets and extendUnderNavBar is false for it).
+        int bottomOffset = Math.round(density * GlassConfig.barOffsetDp);
+        int margin = bottomOffset - host.shadowPad();
+        ViewGroup.LayoutParams raw = host.getLayoutParams();
+        if (raw instanceof ViewGroup.MarginLayoutParams) {
+            ViewGroup.MarginLayoutParams mlp = (ViewGroup.MarginLayoutParams) raw;
+            if (mlp.bottomMargin != margin) {
+                mlp.bottomMargin = margin;
+                host.setLayoutParams(mlp);
+                host.requestLayout();
+            }
+        }
+        // 2. pillExtraHeightDp -> pill height + re-centred tab padding.
+        int oldExtra = sAppliedPillExtraHeightDp;
+        int newExtra = GlassConfig.pillExtraHeightDp;
+        if (oldExtra != newExtra && sBarHeight > 0) {
+            int deltaPx = Math.round(density * newExtra)
+                    - Math.round(density * oldExtra);
+            int newBarHeight = sBarHeight + deltaPx;
+            if (newBarHeight > 0) {
+                sBarHeight = newBarHeight;
+                ViewGroup tabRow = sTabRowRef.get();
+                if (tabRow == null && tabView instanceof ViewGroup) {
+                    tabRow = TabBarBridge.findTabRow((ViewGroup) tabView);
+                }
+                int tabH = 0;
+                if (tabRow != null) {
+                    for (int i = 0; i < tabRow.getChildCount(); i++) {
+                        View t = tabRow.getChildAt(i);
+                        if (t.getVisibility() == View.VISIBLE) {
+                            tabH = Math.max(tabH, t.getHeight());
+                        }
+                    }
+                }
+                int vPad = Math.max(0, (sBarHeight - tabH) / 2);
+                tabView.setPadding(tabView.getPaddingLeft(), vPad,
+                        tabView.getPaddingRight(), vPad);
+                restoreBarContentHeight(host);
+            }
+        }
+        // 3. pillSideInsetDp -> narrower pill. Re-hug: hugContentWidth
+        // now reserves the side inset from the room the tabs may use, so
+        // the tabs shrink to fit the narrower pill instead of overflowing
+        // it, and the host is re-centred on its new width. The droplet is
+        // re-placed by the per-frame maintainDropletGeometry once the tab
+        // width changes (see there).
+        ViewGroup tabRowSide = sTabRowRef.get();
+        if (tabRowSide != null) {
+            int barWidthSide = hugContentWidth(tabRowSide, density);
+            if (barWidthSide > 0) {
+                int desiredSide = barWidthSide + host.shadowPad() * 2;
+                if (host.getParent() instanceof View
+                        && ((View) host.getParent()).getWidth() > 0) {
+                    desiredSide = Math.min(desiredSide,
+                            ((View) host.getParent()).getWidth());
+                }
+                setHostWidthCentered(host, desiredSide);
+                host.requestLayout();
+            }
+        }
+        sAppliedBarOffsetDp = GlassConfig.barOffsetDp;
+        sAppliedPillExtraHeightDp = GlassConfig.pillExtraHeightDp;
+        sAppliedPillSideInsetDp = GlassConfig.pillSideInsetDp;
+        LiquidGlassModule.log(android.util.Log.INFO,
+                "tuned config re-applied: barOffsetDp=" + GlassConfig.barOffsetDp
+                        + " pillExtraHeightDp=" + GlassConfig.pillExtraHeightDp
+                        + " pillSideInsetDp=" + GlassConfig.pillSideInsetDp
+                        + " barHeight=" + sBarHeight);
     }
 
     private static void installSelectionWatcher(LiquidGlassHostLayout host) {
@@ -3223,5 +3488,13 @@ final class LiquidGlassInstaller {
             return;
         }
         syncDropletSize(sLastIndex);
+        // The droplet's translationX is measured against the old tab
+        // positions, so a width change (a narrower pill, narrower tabs)
+        // leaves it parked over the wrong tab until the next switch.
+        // Snap it to the current tab now that the new layout has landed
+        // (this runs on pre-draw, after layout). Ignored mid-drag.
+        if (sDrag != null) {
+            sDrag.animateToIndex(sLastIndex, true);
+        }
     }
 }

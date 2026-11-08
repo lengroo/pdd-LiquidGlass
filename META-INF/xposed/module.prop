@@ -2,3 +2,8 @@ minApiVersion=102
 targetApiVersion=102
 exceptionMode=protective
 staticScope=true
+# Hot reload PARKED 2026-11-08 (hotupdate7/8 both failed in the main
+# process: 1 reloaded, 1 failed, pill never turned green). The
+# onHotReloading/onHotReloaded/teardown code stays in place, dormant;
+# flip this back to true to retry it.
+autoHotReload=false

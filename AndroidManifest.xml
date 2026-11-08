@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="io.github.lengroo.pddlg"
-    android:versionCode="58"
-    android:versionName="1.0.19">
+    android:versionCode="67"
+    android:versionName="1.0.20">
 
     <uses-sdk
         android:minSdkVersion="26"
@@ -21,6 +21,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- Serves the tuning values to the module code inside PDD (see
+             ConfigProvider). Exported and read-only: the values are plain
+             dp numbers, not secrets. -->
+        <provider
+            android:name=".ConfigProvider"
+            android:authorities="io.github.lengroo.pddlg.config"
+            android:exported="true" />
     </application>
 
 </manifest>

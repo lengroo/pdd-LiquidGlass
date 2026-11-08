@@ -6,4 +6,10 @@
     <string name="about_github_summary">github.com/lengroo/pdd-LiquidGlass</string>
     <string name="about_telegram">加入我们的 Telegram 频道</string>
     <string name="about_telegram_summary">t.me/fengjimmm</string>
+    <string name="tuning_title">微调</string>
+    <string name="tuning_hint">改完切回pdd即生效，无需强制重启pdd</string>
+    <string name="tuning_bar_offset">药丸离底边距离</string>
+    <string name="tuning_pill_extra">药丸额外高度</string>
+    <string name="tuning_pill_side">药丸左右边距</string>
+    <string name="tuning_reset">恢复默认</string>
 </resources>
