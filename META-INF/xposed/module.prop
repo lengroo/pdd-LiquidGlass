@@ -2,8 +2,12 @@ minApiVersion=102
 targetApiVersion=102
 exceptionMode=protective
 staticScope=true
-# Hot reload PARKED 2026-11-08 (hotupdate7/8 both failed in the main
-# process: 1 reloaded, 1 failed, pill never turned green). The
-# onHotReloading/onHotReloaded/teardown code stays in place, dormant;
-# flip this back to true to retry it.
-autoHotReload=false
+# libxposed API 102 code hot reload (shipped in 1.0.21): updating the
+# module while Pinduoduo is running replaces the code in place, no
+# force-stop. onHotReloaded does a full takeover — unhooks every old
+# hook, resolves HostApp itself (the framework does not replay
+# onModuleLoaded/onPackageLoaded), re-registers the new hooks,
+# reinstalls the pill and restores the saved tab index. The install
+# strips any previous generation's host (by class name), resets every
+# leftover translation before measuring, and refuses garbage bounds.
+autoHotReload=true

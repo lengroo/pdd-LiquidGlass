@@ -91,6 +91,18 @@ public class LiquidGlassModule extends XposedModule {
             return;
         }
         sApp = app;
+        installResumeHook(app);
+    }
+
+    /**
+     * (Re-)registers the callActivityOnResume hook for this generation.
+     * Extracted from onModuleLoaded so onHotReloaded can re-register it
+     * after a reload — the framework does NOT replay onModuleLoaded, and
+     * the old generation's hook keeps running old code until it is
+     * replaced (proven 2026-11-09: old hook reinstalled the green pill
+     * after teardown, onResume #2/#3 in the Vector log).
+     */
+    private void installResumeHook(HostApp app) {
         try {
             Method callOnResume = Instrumentation.class.getMethod(
                     "callActivityOnResume", Activity.class);
@@ -155,6 +167,7 @@ public class LiquidGlassModule extends XposedModule {
      */
     @Override
     public boolean onHotReloading(XposedModuleInterface.HotReloadingParam param) {
+        log(android.util.Log.INFO, "hot reload: onHotReloading fired");
         try {
             android.os.Bundle state = new android.os.Bundle();
             state.putBoolean("hadPill", LiquidGlassInstaller.hasLivePill());
@@ -193,36 +206,108 @@ public class LiquidGlassModule extends XposedModule {
     }
 
     /**
-     * API 102 hot reload, new generation: reinstall the pill into the live
-     * Activity right away instead of waiting for the next onResume. The
-     * Activity is found here via ActivityThread, not taken from the saved
-     * state (see onHotReloading: a live Activity in that state broke the
-     * first reload). The hooks themselves are re-registered by the framework
-     * replaying onModuleLoaded/onPackageLoaded on this instance; if that
-     * replay ever skips, the next resume still installs through the (then
-     * missing) hook, so this is the fast path, not the only one. Tuning
-     * values are re-read from prefs here because this generation's statics
-     * start empty.
+     * API 102 hot reload, new generation: take over from the old generation.
+     *
+     * <p>Two facts the 2026-11-09 diagnostic proved (Vector log, reload at
+     * 13:18:02): (1) the framework does NOT replay onModuleLoaded /
+     * onPackageLoaded, so sApp is null here and the reinstall used to be
+     * skipped; (2) the old generation's hooks SURVIVE the reload — its
+     * callActivityOnResume hook fired onResume #2/#3 afterwards and
+     * reinstalled the OLD (green) pill. So this callback must do the whole
+     * takeover itself: unhook every old hook, resolve HostApp directly,
+     * re-register this generation's hooks, then reinstall the pill.
+     * The tab listener field still holds the old generation's Proxy; the
+     * new install handles it via the existing "hook the listener's
+     * onTabSelected" branch (isOurs is per-ClassLoader, so the old Proxy
+     * reads as the app's own listener and gets hooked for new code).
      */
     @Override
     public void onHotReloaded(XposedModuleInterface.HotReloadedParam param) {
         try {
+            // 1. Unhook every old-generation hook so old code stops running.
+            int unhooked = 0;
+            try {
+                java.util.List<XposedInterface.HookHandle> old =
+                        param.getOldHookHandles();
+                if (old != null) {
+                    for (XposedInterface.HookHandle h : old) {
+                        try {
+                            h.unhook();
+                            unhooked++;
+                        } catch (Throwable ignored) {
+                        }
+                    }
+                }
+            } catch (Throwable t) {
+                logErr("hot reload: unhook old hooks failed", t);
+            }
+            log(android.util.Log.INFO,
+                    "hot reload: unhooked " + unhooked + " old hooks");
+
+            // 2. Resolve HostApp directly — no replay to rely on.
             Activity activity = currentResumedActivity();
-            log(android.util.Log.INFO, "hot reloaded, resumed activity="
-                    + (activity != null ? activity.getClass().getSimpleName() : "null"));
             if (activity == null || activity.isFinishing() || activity.isDestroyed()) {
+                log(android.util.Log.INFO, "hot reloaded: no live activity");
                 return;
             }
-            HostApp app = sApp;
+            HostApp app = HostApp.forPackage(activity.getPackageName());
             if (app == null || !app.isLauncherActivity(activity.getClass().getName())) {
+                log(android.util.Log.INFO, "hot reloaded: not a launcher activity, pkg="
+                        + activity.getPackageName()
+                        + " activity=" + activity.getClass().getName());
                 return;
             }
-            // onHotReloaded may run off the main thread; the reinstall posts
-            // view work, so route it through the Activity's UI thread.
+            sApp = app;
+            log(android.util.Log.INFO, "hot reloaded: sApp=" + app
+                    + ", re-registering hooks");
+
+            // Read the selected tab index the old generation saved in
+            // onHotReloading. Do NOT set it yet: install() resets
+            // sLastIndex to -1 as part of a fresh install, so a restore
+            // here is wiped out before the pill exists. It is applied
+            // after the install lands, in step 4 below.
+            final int restoredIndex;
+            {
+                int idx = -1;
+                try {
+                    Object saved = param.getSavedInstanceState();
+                    if (saved instanceof android.os.Bundle) {
+                        idx = ((android.os.Bundle) saved).getInt("lastIndex", -1);
+                    }
+                } catch (Throwable ignored) {
+                }
+                restoredIndex = idx;
+            }
+
+            // 3. Re-register this generation's hooks.
+            installResumeHook(app);
+            try {
+                TabBarBridge.install(app, activity.getClass().getClassLoader());
+            } catch (Throwable t) {
+                logErr("hot reload: TabBarBridge.install failed", t);
+            }
+
+            // 4. Reinstall the pill now, then restore the saved tab index
+            // after the install. scheduleInstall posts tryInstall to the
+            // decor view; posting the restore to the same view queues it
+            // after the install's synchronous part (which resets
+            // sLastIndex), so the droplet lands on the current tab instead
+            // of waiting for the next tab switch.
+            log(android.util.Log.INFO, "hot reloaded: reinstalling pill");
             activity.runOnUiThread(() -> {
                 try {
                     GlassConfig.load(activity);
                     LiquidGlassInstaller.scheduleInstall(activity);
+                    if (restoredIndex >= 0) {
+                        activity.getWindow().getDecorView().post(() -> {
+                            LiquidGlassInstaller.setLastSelectedIndex(restoredIndex);
+                            log(android.util.Log.INFO,
+                                    "hot reloaded: restored lastIndex=" + restoredIndex);
+                        });
+                    } else {
+                        log(android.util.Log.INFO,
+                                "hot reloaded: no saved lastIndex, droplet waits for next tab switch");
+                    }
                 } catch (Throwable t) {
                     logErr("hot reloaded reinstall failed", t);
                 }
