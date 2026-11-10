@@ -2,7 +2,7 @@
 
 为拼多多打造的 iOS 26 风格液态玻璃底部导航栏 · LSPosed 模块（libxposed API 102）
 
-> 当前版本：v1.0.21，APK 见 [Releases](https://github.com/lengroo/pdd-LiquidGlass/releases)。
+> 当前版本：v1.0.22，APK 见 [Releases](https://github.com/lengroo/pdd-LiquidGlass/releases)。
 > 本项目：[lengroo/pdd-LiquidGlass](https://github.com/lengroo/pdd-LiquidGlass)
 > 已上架 LSPosed 官方仓库：[Xposed-Modules-Repo/io.github.lengroo.pddlg](https://github.com/Xposed-Modules-Repo/io.github.lengroo.pddlg)
 
@@ -15,9 +15,9 @@
 - 🔍 **背景实时跟随**：玻璃折射的是当前页面的真实内容，切页即变
 - 🧩 **完整保留原生功能**：未读角标、图标、文字颜色全部走应用自己的实现，角标不参与染色
 - 📱 **单宿主**：只做拼多多，差异集中在 `HostApp` 一张表里
-- 🌗 **深浅色跟随**：读取应用 uiMode
+- 🌗 **深浅色主题适配**：未选中标签的图标与文字跟随系统深浅色，也可在设置「主题」里手动选跟随系统 / 浅色 / 深色
 - 🎛️ **数值微调**：设置界面「微调」卡片可调药丸离底边距离（0–48dp）、药丸额外高度（0–24dp）、药丸左右边距（每边 0–48dp），改完切回拼多多即生效，无需重装
-- 🔥 **代码热重载**：更新模块后无需强制停止拼多多，新代码直接在运行中接管，药丸状态（当前标签、水滴位置）原样保留（需 libxposed api 102；首次启用仍需重启一次拼多多）
+- 🧭 **设置界面**：微调 / 主题 / 关于三个页面，下拉框选择主题，返回键先收起下拉框
 - ♿ **降级兜底**：Android 12 保留 GPU 模糊与液滴，只少了边缘折射（AGSL 需 13）；
   Android 12 以下退化为轻磨砂；native 模糊库不可用时自动切纯 Java 实现
 
@@ -25,7 +25,7 @@
 
 1. 准备支持 **libxposed API 102** 的 LSPosed 环境
 2. 安装 APK，在 LSPosed 中启用（作用域已限定 `com.xunmeng.pinduoduo`）
-3. **强制停止**拼多多后重新打开（首次启用；之后更新模块无需强制停止，热重载直接接管）
+3. **强制停止**拼多多后重新打开
 
 > 已测试：拼多多 `8.29.0` / `8.30.0`
 >
@@ -84,7 +84,7 @@ Hook Instrumentation.callActivityOnResume
 | 每列额外留白 | `hugContentWidth()` | 32dp |
 | 底部抬升 | `GlassConfig.barOffsetDp`（设置界面「微调」可调） | 24dp |
 | 药丸额外高度 | `GlassConfig.pillExtraHeightDp`（设置界面「微调」可调） | 12dp（上下对称分摊） |
-| 药丸左右边距 | `GlassConfig.pillSideInsetDp`（设置界面「微调」可调） | 0dp（每边） |
+| 药丸左右边距 | `GlassConfig.pillSideInsetDp`（设置界面「微调」可调） | 30dp（每边） |
 | 按压放大 / 焦点放大 | `DropletDragController` / `DropletPanel` | 1.2 · 1.1 |
 | 液滴高度 | `syncDropletSize()` | 药丸内高 − 2 × 4dp |
 | 拖拽形变上限 | `DropletDragController.STRETCH_LIMIT` | 0.2 |
