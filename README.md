@@ -2,7 +2,7 @@
 
 为拼多多打造的 iOS 26 风格液态玻璃底部导航栏 · LSPosed 模块（libxposed API 102）
 
-> 当前版本：v1.0.22，APK 见 [Releases](https://github.com/lengroo/pdd-LiquidGlass/releases)。
+> 当前版本：v1.0.23，APK 见 [Releases](https://github.com/lengroo/pdd-LiquidGlass/releases)。
 > 本项目：[lengroo/pdd-LiquidGlass](https://github.com/lengroo/pdd-LiquidGlass)
 > 已上架 LSPosed 官方仓库：[Xposed-Modules-Repo/io.github.lengroo.pddlg](https://github.com/Xposed-Modules-Repo/io.github.lengroo.pddlg)
 
@@ -11,7 +11,7 @@
 - 🫧 **单 pass AGSL 透镜管线**：圆角矩形 SDF 折射、边缘色散、重力传感器高光
 - 💧 **玻璃滴选中动效**：切换标签时液滴滑动、回弹；**支持横向拖拽切换**，跟手拉伸、松手吸附
 - 🎯 **对齐 KernelSU 管理器**：悬浮 pill 宽度贴合内容、4dp 轻模糊 + 容器色垫底、
-  按压时液滴放大 `1.2×` 并淡入折射、焦点标签放大 `1.1×`
+  按压时液滴放大 `78/56（约 1.39×）` 并淡入折射、焦点标签放大 `1.1×`
 - 🔍 **背景实时跟随**：玻璃折射的是当前页面的真实内容，切页即变
 - 🧩 **完整保留原生功能**：未读角标、图标、文字颜色全部走应用自己的实现，角标不参与染色
 - 📱 **单宿主**：只做拼多多，差异集中在 `HostApp` 一张表里
@@ -85,8 +85,8 @@ Hook Instrumentation.callActivityOnResume
 | 底部抬升 | `GlassConfig.barOffsetDp`（设置界面「微调」可调） | 24dp |
 | 药丸额外高度 | `GlassConfig.pillExtraHeightDp`（设置界面「微调」可调） | 12dp（上下对称分摊） |
 | 药丸左右边距 | `GlassConfig.pillSideInsetDp`（设置界面「微调」可调） | 30dp（每边） |
-| 按压放大 / 焦点放大 | `DropletDragController` / `DropletPanel` | 1.2 · 1.1 |
-| 液滴高度 | `syncDropletSize()` | 药丸内高 − 2 × 4dp |
+| 按压放大 / 焦点放大 | `DropletDragController` / `DropletPanel` | 78/56（约 1.39）· 1.1 |
+| 液滴高度 | `syncDropletSize()` | 药丸内高 − 2 × 2dp |
 | 拖拽形变上限 | `DropletDragController.STRETCH_LIMIT` | 0.2 |
 
 ### 液滴
@@ -131,4 +131,3 @@ lens(refractionHeight = 10dp × p, refractionAmount = 14dp × p,
 ## 📄 License
 
 MIT，与上游相同，见 [LICENSE](LICENSE)。
-
