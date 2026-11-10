@@ -45,7 +45,35 @@ final class GlassConfig {
      * the whole pill — glass and tabs — narrows and stays centred. 0 is
      * the full-width bar.
      */
-    static volatile int pillSideInsetDp = 0;
+    static volatile int pillSideInsetDp = 30;
+
+    /**
+     * Theme mode for the unselected tabs' icon/label colour. 0 follows the
+     * system (light/dark), 1 forces light, 2 forces dark. The unselected
+     * tabs are black in light mode and white in dark mode; the selected tab
+     * keeps the app's own colour.
+     */
+    static volatile int themeMode = 0;
+
+    /**
+     * Whether the pill's unselected tabs should use the dark-mode colour
+     * (white). Follows the system UI mode when themeMode is 0.
+     */
+    static boolean isDarkTheme(Context ctx) {
+        if (themeMode == 1) {
+            return false;
+        }
+        if (themeMode == 2) {
+            return true;
+        }
+        try {
+            int night = ctx.getResources().getConfiguration().uiMode
+                    & android.content.res.Configuration.UI_MODE_NIGHT_MASK;
+            return night == android.content.res.Configuration.UI_MODE_NIGHT_YES;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
 
     private GlassConfig() {
     }
@@ -63,6 +91,7 @@ final class GlassConfig {
             barOffsetDp = p.getInt("barOffsetDp", barOffsetDp);
             pillExtraHeightDp = p.getInt("pillExtraHeightDp", pillExtraHeightDp);
             pillSideInsetDp = p.getInt("pillSideInsetDp", pillSideInsetDp);
+            themeMode = p.getInt("themeMode", themeMode);
         } catch (Throwable t) {
             LiquidGlassModule.logErr("config load failed", t);
         }
@@ -79,6 +108,7 @@ final class GlassConfig {
             barOffsetDp = c.getInt(c.getColumnIndexOrThrow("barOffsetDp"));
             pillExtraHeightDp = c.getInt(c.getColumnIndexOrThrow("pillExtraHeightDp"));
             pillSideInsetDp = c.getInt(c.getColumnIndexOrThrow("pillSideInsetDp"));
+            themeMode = c.getInt(c.getColumnIndexOrThrow("themeMode"));
             return true;
         } catch (Throwable t) {
             return false;

@@ -6,9 +6,15 @@ import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.Image
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -21,58 +27,203 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.navigationevent.NavigationEvent
+import androidx.navigationevent.NavigationEventDispatcher
+import androidx.navigationevent.NavigationEventDispatcherOwner
+import androidx.navigationevent.NavigationEventInput
+import androidx.navigationevent.compose.LocalNavigationEventDispatcherOwner
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import top.yukonga.miuix.kmp.basic.BasicComponent
 import top.yukonga.miuix.kmp.basic.Card
 import top.yukonga.miuix.kmp.basic.Icon
+import top.yukonga.miuix.kmp.basic.IconButton
 import top.yukonga.miuix.kmp.basic.Scaffold
 import top.yukonga.miuix.kmp.basic.Slider
 import top.yukonga.miuix.kmp.basic.SmallTopAppBar
 import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.basic.ArrowRight
+import top.yukonga.miuix.kmp.icon.extended.Back
+import top.yukonga.miuix.kmp.icon.extended.Info
+import top.yukonga.miuix.kmp.icon.extended.Theme
+import top.yukonga.miuix.kmp.icon.extended.Tune
+import top.yukonga.miuix.kmp.preference.OverlayDropdownPreference
 import top.yukonga.miuix.kmp.theme.ColorSchemeMode
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 import top.yukonga.miuix.kmp.theme.ThemeController
 
 /**
- * The module's launcher entry: an About screen ported from KernelSU's
- * MIUIX About screen (manager AboutMiuix.kt), simplified — no parallax
- * logo, no blur backdrop, just the logo, app name, version, and a link
- * card. Links: GitHub (this repo) and Telegram (the owner's channel).
- * There is intentionally NO QQ channel row.
+ * The module's launcher entry.
+ *
+ * <p>Three screens behind one menu, all MIUIX: the main menu lists
+ * 关于 / 微调 / 主题, each opening its own screen (the sub-screens get
+ * a back button in the top bar). The theme mode is stored in the module
+ * app's own prefs and served to PDD through ConfigProvider; it also
+ * drives this UI's own theme, so the picker shows what it does.
  */
+private enum class Screen {
+    Main, About, Tuning, Theme
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         actionBar?.hide()
         try {
             setContent {
-                val themeController = remember {
-                    ThemeController(ColorSchemeMode.System)
+                val context = LocalContext.current
+                var screen by remember { mutableStateOf(Screen.Main) }
+                var themeMode by remember {
+                    mutableIntStateOf(readTuningValue(context, "themeMode", 0))
                 }
-                MiuixTheme(controller = themeController) {
-                    Scaffold(
-                        topBar = {
-                            SmallTopAppBar(
-                                title = getString(R.string.about_title),
-                            )
-                        },
-                        content = { paddingValues ->
-                            AboutScreen(paddingValues = paddingValues)
-                        },
+                val themeController = remember(themeMode) {
+                    ThemeController(
+                        when (themeMode) {
+                            1 -> ColorSchemeMode.Light
+                            2 -> ColorSchemeMode.Dark
+                            else -> ColorSchemeMode.System
+                        }
                     )
+                }
+                // System back (gesture/button) on a sub-screen returns to
+                // the main menu instead of exiting the app.
+                BackHandler(enabled = screen != Screen.Main) {
+                    screen = Screen.Main
+                }
+                // MIUIX popups (OverlayDropdownPreference) register a
+                // NavigationBackHandler, which needs a NavigationEventDispatcher
+                // via LocalNavigationEventDispatcherOwner. This manual build's
+                // ComponentActivity (activity 1.11.0) does not provide one, so
+                // tapping the dropdown crashed with IllegalStateException
+                // ("No NavigationEventDispatcher was provided"). Provide a
+                // local dispatcher here.
+                //
+                // The standalone dispatcher receives no system-back events
+                // on its own, so bridge them in: the preference reports its
+                // open/closed state via onExpandedChange (dropdownOpen), and
+                // a BackHandler composed after the screen BackHandler (so it
+                // wins while enabled) forwards one back press into the
+                // dispatcher as started -> progressed(1f) -> completed. The
+                // popup's NavigationBackHandler then dismisses it, instead
+                // of back dropping to the main menu. The progressed step
+                // matters: started -> completed alone never fires the
+                // popup's onBackCompleted. When no popup is open the
+                // handler is disabled and back falls through to the screen
+                // handler above. (Upgrading activity to 1.12+ would give
+                // ComponentActivity its own NavigationEventDispatcherOwner
+                // and make this bridge unnecessary, but that is a bigger
+                // dependency change.)
+                var dropdownOpen by remember { mutableStateOf(false) }
+                val navDispatcher = remember { NavigationEventDispatcher() }
+                val navBackInput = remember {
+                    object : NavigationEventInput() {
+                        fun sendBack() {
+                            dispatchOnBackStarted(NavigationEvent())
+                            dispatchOnBackProgressed(
+                                NavigationEvent(progress = 1f),
+                            )
+                            dispatchOnBackCompleted()
+                        }
+                    }
+                }
+                DisposableEffect(navDispatcher, navBackInput) {
+                    navDispatcher.addInput(navBackInput)
+                    onDispose { navDispatcher.removeInput(navBackInput) }
+                }
+                BackHandler(enabled = dropdownOpen) {
+                    navBackInput.sendBack()
+                }
+                val navDispatcherOwner = remember {
+                    object : NavigationEventDispatcherOwner {
+                        override val navigationEventDispatcher: NavigationEventDispatcher
+                            get() = navDispatcher
+                    }
+                }
+                CompositionLocalProvider(
+                    LocalNavigationEventDispatcherOwner provides navDispatcherOwner,
+                ) {
+                    MiuixTheme(controller = themeController) {
+                        Scaffold(
+                            topBar = {
+                                SmallTopAppBar(
+                                    title = when (screen) {
+                                        Screen.Main -> getString(R.string.app_name)
+                                        Screen.About -> getString(R.string.about_title)
+                                        Screen.Tuning -> getString(R.string.tuning_title)
+                                        Screen.Theme -> getString(R.string.theme_title)
+                                    },
+                                    navigationIcon = {
+                                        if (screen != Screen.Main) {
+                                            BackButton { screen = Screen.Main }
+                                        }
+                                    },
+                                )
+                            },
+                            content = { paddingValues ->
+                                // Page transition: entering a sub-screen slides
+                                // in from the right, going back slides in from
+                                // the left — the standard Android page pattern.
+                                AnimatedContent(
+                                    targetState = screen,
+                                    transitionSpec = {
+                                        val forward = initialState == Screen.Main
+                                                && targetState != Screen.Main
+                                        if (forward) {
+                                            (slideInHorizontally { it } + fadeIn())
+                                                .togetherWith(
+                                                    slideOutHorizontally { -it } + fadeOut()
+                                                )
+                                        } else {
+                                            (slideInHorizontally { -it } + fadeIn())
+                                                .togetherWith(
+                                                    slideOutHorizontally { it } + fadeOut()
+                                                )
+                                        }
+                                    },
+                                    label = "screen",
+                                ) { currentScreen ->
+                                    when (currentScreen) {
+                                        Screen.Main -> MainScreen(
+                                            paddingValues = paddingValues,
+                                            onNavigate = { screen = it },
+                                        )
+                                        Screen.About -> AboutScreen(paddingValues = paddingValues)
+                                        Screen.Tuning -> TuningScreen(paddingValues = paddingValues)
+                                        Screen.Theme -> ThemeScreen(
+                                            paddingValues = paddingValues,
+                                            themeMode = themeMode,
+                                            onThemeModeChange = { mode ->
+                                                themeMode = mode
+                                                writeTuningValue(context, "themeMode", mode)
+                                            },
+                                            onDropdownExpandedChange = { expanded ->
+                                                dropdownOpen = expanded
+                                            },
+                                        )
+                                    }
+                                }
+                            },
+                        )
+                    }
                 }
             }
         } catch (e: Throwable) {
@@ -84,6 +235,106 @@ class MainActivity : ComponentActivity() {
                 (24 * d).toInt(), (24 * d).toInt(),
             )
             setContentView(view)
+        }
+    }
+}
+
+/** MIUIX back button: IconButton + the Back icon, flipped for RTL. */
+@Composable
+private fun BackButton(onClick: () -> Unit) {
+    val layoutDirection = LocalLayoutDirection.current
+    IconButton(onClick = onClick) {
+        Icon(
+            modifier = Modifier.graphicsLayer {
+                if (layoutDirection == LayoutDirection.Rtl) scaleX = -1f
+            },
+            imageVector = MiuixIcons.Back,
+            contentDescription = null,
+            tint = MiuixTheme.colorScheme.onBackground,
+        )
+    }
+}
+
+/** The main menu: 关于 / 微调 / 主题, each opening its own screen. */
+@Composable
+private fun MainScreen(
+    paddingValues: PaddingValues,
+    onNavigate: (Screen) -> Unit,
+) {
+    val scrollState = rememberScrollState()
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(scrollState)
+            .padding(paddingValues)
+            .padding(horizontal = 12.dp),
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+            insideMargin = PaddingValues(0.dp),
+        ) {
+            BasicComponent(
+                title = LocalContext.current.getString(R.string.tuning_title),
+                startAction = {
+                    Icon(
+                        imageVector = MiuixIcons.Tune,
+                        contentDescription = null,
+                        modifier = Modifier.size(22.dp),
+                        tint = MiuixTheme.colorScheme.onBackground,
+                    )
+                },
+                endActions = {
+                    Icon(
+                        imageVector = MiuixIcons.Basic.ArrowRight,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = MiuixTheme.colorScheme.onBackgroundVariant,
+                    )
+                },
+                onClick = { onNavigate(Screen.Tuning) },
+            )
+            BasicComponent(
+                title = LocalContext.current.getString(R.string.theme_title),
+                startAction = {
+                    Icon(
+                        imageVector = MiuixIcons.Theme,
+                        contentDescription = null,
+                        modifier = Modifier.size(22.dp),
+                        tint = MiuixTheme.colorScheme.onBackground,
+                    )
+                },
+                endActions = {
+                    Icon(
+                        imageVector = MiuixIcons.Basic.ArrowRight,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = MiuixTheme.colorScheme.onBackgroundVariant,
+                    )
+                },
+                onClick = { onNavigate(Screen.Theme) },
+            )
+            BasicComponent(
+                title = LocalContext.current.getString(R.string.about_title),
+                startAction = {
+                    Icon(
+                        imageVector = MiuixIcons.Info,
+                        contentDescription = null,
+                        modifier = Modifier.size(22.dp),
+                        tint = MiuixTheme.colorScheme.onBackground,
+                    )
+                },
+                endActions = {
+                    Icon(
+                        imageVector = MiuixIcons.Basic.ArrowRight,
+                        contentDescription = null,
+                        modifier = Modifier.size(18.dp),
+                        tint = MiuixTheme.colorScheme.onBackgroundVariant,
+                    )
+                },
+                onClick = { onNavigate(Screen.About) },
+            )
         }
     }
 }
@@ -100,20 +351,6 @@ private fun AboutScreen(paddingValues: PaddingValues) {
         } catch (e: PackageManager.NameNotFoundException) {
             ""
         }
-    }
-    // Tuning values, read from the module app's own prefs (the same file
-    // ConfigProvider serves to PDD). Written on every slider move; PDD
-    // picks them up on the next home onResume, no reinstall needed.
-    // Note: GlassConfig is Java compiled after this Kotlin file, so the UI
-    // reads/writes the prefs directly instead of calling into it.
-    var barOffset by remember {
-        mutableIntStateOf(readTuningValue(context, "barOffsetDp", 24))
-    }
-    var pillExtra by remember {
-        mutableIntStateOf(readTuningValue(context, "pillExtraHeightDp", 12))
-    }
-    var pillSide by remember {
-        mutableIntStateOf(readTuningValue(context, "pillSideInsetDp", 0))
     }
     val scrollState = rememberScrollState()
     Column(
@@ -195,6 +432,34 @@ private fun AboutScreen(paddingValues: PaddingValues) {
                 },
             )
         }
+    }
+}
+
+@Composable
+private fun TuningScreen(paddingValues: PaddingValues) {
+    val context = LocalContext.current
+    // Tuning values, read from the module app's own prefs (the same file
+    // ConfigProvider serves to PDD). Written on every slider move; PDD
+    // picks them up on the next home onResume, no reinstall needed.
+    // Note: GlassConfig is Java compiled after this Kotlin file, so the UI
+    // reads/writes the prefs directly instead of calling into it.
+    var barOffset by remember {
+        mutableIntStateOf(readTuningValue(context, "barOffsetDp", 24))
+    }
+    var pillExtra by remember {
+        mutableIntStateOf(readTuningValue(context, "pillExtraHeightDp", 12))
+    }
+    var pillSide by remember {
+        mutableIntStateOf(readTuningValue(context, "pillSideInsetDp", 30))
+    }
+    val scrollState = rememberScrollState()
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(scrollState)
+            .padding(paddingValues)
+            .padding(horizontal = 12.dp),
+    ) {
         // Tuning card: barOffsetDp + pillExtraHeightDp. Values are written
         // to the module app's prefs on every move; PDD reads them through
         // ConfigProvider on the next home onResume and re-applies the pill
@@ -221,7 +486,7 @@ private fun AboutScreen(paddingValues: PaddingValues) {
                 Spacer(modifier = Modifier.height(12.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
@@ -249,7 +514,7 @@ private fun AboutScreen(paddingValues: PaddingValues) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
@@ -277,7 +542,7 @@ private fun AboutScreen(paddingValues: PaddingValues) {
                 Spacer(modifier = Modifier.height(8.dp))
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
+                    horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Text(
@@ -307,14 +572,72 @@ private fun AboutScreen(paddingValues: PaddingValues) {
                     onClick = {
                         barOffset = 24
                         pillExtra = 12
-                        pillSide = 0
+                        pillSide = 30
                         writeTuningValue(context, "barOffsetDp", 24)
                         writeTuningValue(context, "pillExtraHeightDp", 12)
-                        writeTuningValue(context, "pillSideInsetDp", 0)
+                        writeTuningValue(context, "pillSideInsetDp", 30)
                     },
                 )
             }
         }
+    }
+}
+
+/**
+ * Theme screen: the unselected tabs' icon/label colour. 0 follows the
+ * system, 1 forces light (black), 2 forces dark (white). The choice is
+ * written to the module app's prefs; PDD picks it up on the next home
+ * onResume, no reinstall needed.
+ *
+ * <p>The selector is MIUIX's OverlayDropdownPreference — the same
+ * component KernelSU's manager uses for its dropdown settings (e.g. the
+ * mount-namespace picker in RootProfileConfigMiuix). It lives in
+ * miuix-preference, whose 0.9.4 AAR now sits in ~/tools/compose-deps/
+ * alongside the other MIUIX modules, so the manual build picks it up.
+ */
+@Composable
+private fun ThemeScreen(
+    paddingValues: PaddingValues,
+    themeMode: Int,
+    onThemeModeChange: (Int) -> Unit,
+    onDropdownExpandedChange: (Boolean) -> Unit,
+) {
+    val context = LocalContext.current
+    val scrollState = rememberScrollState()
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(scrollState)
+            .padding(paddingValues)
+            .padding(horizontal = 12.dp),
+    ) {
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp),
+            insideMargin = PaddingValues(0.dp),
+        ) {
+            OverlayDropdownPreference(
+                title = context.getString(R.string.theme_title),
+                summary = context.getString(R.string.theme_summary),
+                items = listOf(
+                    context.getString(R.string.theme_system),
+                    context.getString(R.string.theme_light),
+                    context.getString(R.string.theme_dark),
+                ),
+                selectedIndex = themeMode,
+                onSelectedIndexChange = { index -> onThemeModeChange(index) },
+                onExpandedChange = onDropdownExpandedChange,
+            )
+        }
+        Text(
+            text = context.getString(R.string.theme_hint),
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            fontSize = 13.sp,
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 12.dp, start = 4.dp, end = 4.dp),
+        )
     }
 }
 

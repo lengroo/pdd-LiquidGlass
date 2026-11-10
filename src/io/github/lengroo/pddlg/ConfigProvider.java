@@ -37,11 +37,12 @@ public class ConfigProvider extends ContentProvider {
         }
         SharedPreferences p = ctx.getSharedPreferences(PREFS, 0);
         MatrixCursor c = new MatrixCursor(
-                new String[]{"barOffsetDp", "pillExtraHeightDp", "pillSideInsetDp"});
+                new String[]{"barOffsetDp", "pillExtraHeightDp", "pillSideInsetDp", "themeMode"});
         c.addRow(new Object[]{
                 p.getInt("barOffsetDp", GlassConfig.barOffsetDp),
                 p.getInt("pillExtraHeightDp", GlassConfig.pillExtraHeightDp),
-                p.getInt("pillSideInsetDp", GlassConfig.pillSideInsetDp)});
+                p.getInt("pillSideInsetDp", GlassConfig.pillSideInsetDp),
+                p.getInt("themeMode", GlassConfig.themeMode)});
         return c;
     }
 

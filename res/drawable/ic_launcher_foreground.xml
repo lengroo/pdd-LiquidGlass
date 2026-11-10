@@ -9,11 +9,25 @@
         <clip-path android:pathData="M292,482 H732 A80,80 0 0 1 732,642 H292 A80,80 0 0 1 292,482 Z" />
         <path
             android:fillColor="#FF5147"
-            android:pathData="M212,482 L452,482 L352,642 L212,642 Z" />
+            android:pathData="M212,482 L452,482 L412,642 L212,642 Z" />
         <path
             android:fillColor="#E02E24"
-            android:pathData="M452,482 L812,482 L812,642 L352,642 Z" />
+            android:pathData="M452,482 L812,482 L812,642 L412,642 Z" />
     </group>
+    <!-- Droplet shadow: soft radial-gradient disc offset 14 down, drawn
+         behind the droplet so it reads as floating above the pill. The
+         two reds (#C81C14 on #E02E24) are too close to read without
+         separation — this is the MaiTungTM fix, shadow instead of a
+         stroke (Diane picked the shadow version for the next release). -->
+    <path android:pathData="M412,486 a100,100 0 1,0 200,0 a100,100 0 1,0 -200,0">
+        <gradient
+            android:type="radial"
+            android:centerX="512"
+            android:centerY="486"
+            android:gradientRadius="100"
+            android:startColor="#6E000000"
+            android:endColor="#00000000" />
+    </path>
     <path
         android:fillColor="#C81C14"
         android:pathData="M424,472 a88,88 0 1,0 176,0 a88,88 0 1,0 -176,0" />

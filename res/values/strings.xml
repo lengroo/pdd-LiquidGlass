@@ -12,4 +12,10 @@
     <string name="tuning_pill_extra">药丸额外高度</string>
     <string name="tuning_pill_side">药丸左右边距</string>
     <string name="tuning_reset">恢复默认</string>
+    <string name="theme_title">主题</string>
+    <string name="theme_summary">选择应用的主题模式</string>
+    <string name="theme_system">跟随系统</string>
+    <string name="theme_light">浅色</string>
+    <string name="theme_dark">深色</string>
+    <string name="theme_hint">浅色模式下未选中的图标和文字为黑色，深色模式下为白色；选中的标签保持拼多多自己的颜色。改完切回拼多多即生效，无需强制重启拼多多</string>
 </resources>

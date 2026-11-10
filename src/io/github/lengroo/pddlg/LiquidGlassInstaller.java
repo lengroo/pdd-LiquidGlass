@@ -49,10 +49,10 @@ final class LiquidGlassInstaller {
     private static WeakReference<Activity> sActivityRef = new WeakReference<>(null);
     /**
      * Where the stock tab bar lived before install re-parented it into the
-     * host: its original parent, index and LayoutParams. Hot reload hands
-     * the bar back to exactly this spot so the new generation can install
-     * cleanly; without the original LayoutParams the bar would lose its
-     * ALIGN_PARENT_BOTTOM rule and stop anchoring to the bottom.
+     * host: its original parent, index and LayoutParams. A failed install
+     * hands the bar back to exactly this spot; without the original
+     * LayoutParams the bar would lose its ALIGN_PARENT_BOTTOM rule and
+     * stop anchoring to the bottom.
      */
     private static WeakReference<ViewGroup> sOriginalParentRef =
             new WeakReference<>(null);
@@ -63,17 +63,6 @@ final class LiquidGlassInstaller {
     private static WeakReference<ViewGroup> sTabRowRef = new WeakReference<>(null);
     private static WeakReference<ViewGroup> sPagerRef = new WeakReference<>(null);
     private static int sLastIndex = -1;
-    /**
-     * Whether the install-time centerPddTabContent pass already centred the
-     * tab content. The one-shot global-layout re-run exists only for the
-     * case where that pass measured zeros (before the first layout); when
-     * it already centred, the re-run must be skipped — its measurement is
-     * taken mid re-layout after re-parenting and reads garbage bounds
-     * (content -80..146, shift +40), which shoves the icons down and the
-     * labels out of the pill until a tab switch re-centres (proven
-     * 2026-11-09, vc73 reload log).
-     */
-    private static boolean sTabContentCentred;
     private static WeakReference<View> sTabViewRef = new WeakReference<>(null);
     private static WeakReference<View> sGlassRef = new WeakReference<>(null);
     private static DropletDragController sDrag;
@@ -340,7 +329,6 @@ final class LiquidGlassInstaller {
         sNavBgRef = new WeakReference<>(null);
         sBlurRelit = false;
         sLastIndex = -1;
-        sTabContentCentred = false;
         sDropletBaseY = 0f;
         sDropletGeometryKey = 0;
         sDropletLogged = false;
@@ -367,83 +355,6 @@ final class LiquidGlassInstaller {
         return sActivityRef.get();
     }
 
-    /** Whether the pill is currently installed in a live window. */
-    static boolean hasLivePill() {
-        LiquidGlassHostLayout host = sHostRef.get();
-        return host != null && host.isAttachedToWindow();
-    }
-
-    /** Selected tab slot the pill is showing, or -1 before the first frame. */
-    static int lastSelectedIndex() {
-        return sLastIndex;
-    }
-
-    /**
-     * Restores the selected tab index after a hot reload, from the state the
-     * old generation saved in onHotReloading. Applied AFTER the reinstall:
-     * install() resets sLastIndex to -1 as part of a fresh install, so a
-     * restore before it is wiped out (vc71 made exactly that mistake).
-     * Without the restore the droplet is never positioned and the pill
-     * looks wrong until the next tab switch — the old Proxy in the
-     * listener field does not re-report the current selection, and the
-     * per-frame visibleTabSelection check only fires once the watcher
-     * stops being short-circuited by the height restore.
-     */
-    static void setLastSelectedIndex(int index) {
-        sLastIndex = index;
-    }
-
-    /**
-     * Hot reload teardown (API 102): hands the stock tab bar back to its
-     * original parent and drops every reference, so the new generation can
-     * install cleanly into the same live Activity.
-     *
-     * <p>The pill itself cannot be handed over: its view classes belong to
-     * this generation's ClassLoader, and the new generation loads its own
-     * copies, so a live host from here would be a ClassCastException there.
-     * Removing it is also what fires the host's own detach (its pre-draw
-     * listener and theme probe), and the installer's per-frame watcher goes
-     * quiet through its guard once resetState drops the host reference —
-     * the dead listener itself stays registered on the window observer and
-     * is a known cleanup item, as are the backdrop layout listener and the
-     * tab listener proxy the old generation left on the bar (both no-ops
-     * against the cleared statics, and tab tracking survives through the
-     * per-frame poll). The drag controller's frame loop is self-terminating
-     * once its springs settle.
-     *
-     * <p>Best effort throughout: a half-torn-down pill is still better than
-     * refusing the reload and stranding the user on old code, and the new
-     * generation's install guards (already-installed host, missing bar
-     * retries) cover the rest.
-     */
-    static void teardownForHotReload() {
-        LiquidGlassHostLayout host = sHostRef.get();
-        View tabView = sTabViewRef.get();
-        ViewGroup origParent = sOriginalParentRef.get();
-        try {
-            if (host != null && tabView != null && origParent != null) {
-                restoreAfterFailedReparent(
-                        origParent, tabView, host, sOriginalIndex, sOriginalTabLp);
-                LiquidGlassModule.log(android.util.Log.INFO,
-                        "hot reload: pill removed, stock bar restored to "
-                                + origParent.getClass().getSimpleName());
-            } else if (host != null && host.getParent() instanceof ViewGroup) {
-                // Original spot unknown (install predates the bookkeeping):
-                // at least get the old pill out of the window.
-                ((ViewGroup) host.getParent()).removeView(host);
-                LiquidGlassModule.log(android.util.Log.WARN,
-                        "hot reload: original bar spot unknown, host removed only");
-            } else {
-                LiquidGlassModule.log(android.util.Log.INFO,
-                        "hot reload: no live pill to tear down");
-            }
-        } catch (Throwable t) {
-            LiquidGlassModule.logErr("hot reload teardown failed", t);
-        } finally {
-            resetState();
-        }
-    }
-
     private static void install(ViewGroup tabView) {
         ViewGroup parent = tabView.getParent() instanceof ViewGroup
                 ? (ViewGroup) tabView.getParent() : null;
@@ -453,46 +364,6 @@ final class LiquidGlassInstaller {
         if (parent instanceof LiquidGlassHostLayout) {
             return; // already installed
         }
-        // A previous generation's host can still be in the tree when this
-        // generation installs. Hot reload: the old generation reinstalls
-        // its own pill between teardown and takeover ("stale host from a
-        // previous Activity dropped, reinstalling"), so the tab bar is
-        // already inside an old host by the time the new generation runs.
-        // instanceof only matches THIS generation's class, so that host
-        // reads as an ordinary parent and findBackdrop fails inside it
-        // (its only ViewGroup child is the tab bar itself) — the install
-        // aborts with "no backdrop sibling found" and retries forever,
-        // while the stale old pill stays on screen. Detect the host by
-        // class name (which matches every generation), strip it out, and
-        // restore the stock bar so the install starts clean.
-        if (isHostLayout(parent)) {
-            ViewGroup hostParent = parent.getParent() instanceof ViewGroup
-                    ? (ViewGroup) parent.getParent() : null;
-            if (hostParent == null) {
-                return;
-            }
-            int hostIndex = hostParent.indexOfChild(parent);
-            parent.removeView(tabView);
-            hostParent.removeView(parent);
-            // The stock bar's layout params are rebuilt (PDD: a
-            // RelativeLayout child anchored to the parent bottom). The
-            // install below re-reads them as the original params.
-            ViewGroup.LayoutParams stockLp = buildStockTabLayoutParams(hostParent);
-            if (hostIndex >= 0) {
-                hostParent.addView(tabView, hostIndex, stockLp);
-            } else {
-                hostParent.addView(tabView, stockLp);
-            }
-            tabView.setAlpha(1f);
-            LiquidGlassModule.log(android.util.Log.INFO,
-                    "hot reload: stale host from a previous generation stripped, stock bar restored");
-            parent = hostParent;
-        }
-        // A previous generation's centring shift survives its teardown, so
-        // reset every translation before ANY measurement — otherwise the
-        // bar height and the centring both read the already-shifted
-        // content and the corruption perpetuates (see resetTabTranslations).
-        resetTabTranslations(tabView);
 
         ViewGroup backdrop = findBackdrop(parent, tabView);
         if (backdrop == null) {
@@ -592,8 +463,8 @@ final class LiquidGlassInstaller {
                 barHeight > 0 ? barHeight : ViewGroup.LayoutParams.WRAP_CONTENT,
                 android.view.Gravity.TOP | android.view.Gravity.FILL_HORIZONTAL);
 
-        // Remember where the stock bar came from, so a hot reload (or any
-        // teardown) can hand it back to exactly this spot.
+        // Remember where the stock bar came from, so a failed install
+        // can hand it back to exactly this spot.
         sOriginalParentRef = new WeakReference<>(parent);
         sOriginalIndex = index;
         sOriginalTabLp = originalLp;
@@ -685,7 +556,7 @@ final class LiquidGlassInstaller {
             stripSolidBackgrounds(tabView);
             disableTabWidgetStrips(tabView);
             TabBarBridge.tagTabIcons(tabRow);
-            sTabContentCentred = centerPddTabContent(tabRow);
+            centerPddTabContent(tabRow);
         } catch (Throwable t) {
             LiquidGlassModule.logErr("could not remove all stock tab chrome", t);
         }
@@ -731,14 +602,10 @@ final class LiquidGlassInstaller {
                         // Laid-out heights are only guaranteed here: if the
                         // install-time pass ran before the first layout, its
                         // centring measured zeros and skipped, and nothing
-                        // ever re-ran it. Re-run ONLY then: when install
-                        // already centred, this pass measures mid re-layout
-                        // and reads garbage bounds that corrupt the layout
-                        // (see sTabContentCentred). Translation is
-                        // idempotent only when the measurement is stable.
-                        if (!sTabContentCentred) {
-                            sTabContentCentred = centerPddTabContent(tabRow);
-                        }
+                        // ever re-ran it. Translation is idempotent (layout
+                        // positions do not move with it), so re-running here
+                        // is safe even when install already centred.
+                        centerPddTabContent(tabRow);
                         syncDropletSize(TabBarBridge.currentIndex(tabView));
                         extendPagesToBottom(backdrop);
                         // The window grows a beat after the flag is set, and the
@@ -1160,6 +1027,8 @@ final class LiquidGlassInstaller {
     private static boolean sFeed4Logged;
     private static boolean sPddOffscreenLogged;
     private static int sPddExpandFrame;
+    /** Frame counter for the throttled unselected-tab colour re-apply. */
+    private static int sTabColourFrame;
     private static final int MAX_TRACKED_SCROLLERS = 16;
 
     /**
@@ -2553,11 +2422,19 @@ final class LiquidGlassInstaller {
                 sPageExtent.request();
                 maintainDropletGeometry();
                 ViewGroup tabRow = sTabRowRef.get();
+                // Unselected tabs read grey from the app; recolour them to
+                // the theme colour (black in light mode, white in dark) on
+                // a slow throttle, since the app re-applies its own grey
+                // whenever it changes the selection.
+                if (++sTabColourFrame % 30 == 0) {
+                    applyUnselectedTabColours(tabRow);
+                }
                 int sel = visibleTabSelection(tabRow);
                 if (sel >= 0 && sel != sLastIndex) {
                     boolean first = sLastIndex < 0;
                     sLastIndex = sel;
                     syncDropletSize(sel);
+                    applyUnselectedTabColours(tabRow);
                     if (sDrag != null) {
                         // KernelSU animates programmatic switches the same way as
                         // drags: press, travel, release.
@@ -2636,6 +2513,71 @@ final class LiquidGlassInstaller {
     }
 
     /**
+     * Recolours the unselected tabs' icon and label to the theme colour —
+     * black in light mode, white in dark mode — instead of the app's own
+     * grey. The selected tab is left alone so it keeps the app's accent
+     * colour.
+     *
+     * <p>PDD re-applies its own grey whenever it changes the selection, so
+     * this runs on every selection change and again on a slow throttle as
+     * a safety net. The icon is an ImageView, recoloured with a SRC_IN
+     * filter; the label is the tab's TextView (the unread badge is a
+     * TextView too, but it carries a background, so the background test
+     * keeps it out — the same test DropletPanel uses to read the label
+     * colour).
+     */
+    private static void applyUnselectedTabColours(ViewGroup tabRow) {
+        if (tabRow == null || !tabRow.isAttachedToWindow()) {
+            return;
+        }
+        boolean dark = GlassConfig.isDarkTheme(tabRow.getContext());
+        int colour = dark ? 0xFFFFFFFF : 0xFF000000;
+        for (int i = 0; i < tabRow.getChildCount(); i++) {
+            View tab = tabRow.getChildAt(i);
+            boolean selected = TabBarBridge.isTabSelected(tab);
+            View icon = TabBarBridge.tabIconViaField(tab);
+            if (icon instanceof android.widget.ImageView) {
+                android.widget.ImageView iv = (android.widget.ImageView) icon;
+                if (selected) {
+                    iv.clearColorFilter();
+                } else {
+                    iv.setColorFilter(colour,
+                            android.graphics.PorterDuff.Mode.SRC_IN);
+                }
+            }
+            android.widget.TextView label = findTabLabel(tab, 0);
+            if (label != null && !selected) {
+                label.setTextColor(colour);
+            }
+        }
+    }
+
+    /** The tab's label TextView: non-empty text, no background (excludes the unread badge). */
+    private static android.widget.TextView findTabLabel(View v, int depth) {
+        if (depth > 4 || v == null || v.getVisibility() != View.VISIBLE) {
+            return null;
+        }
+        if (v instanceof android.widget.TextView) {
+            android.widget.TextView tv = (android.widget.TextView) v;
+            if (tv.getBackground() == null && tv.getText() != null
+                    && tv.getText().length() > 0) {
+                return tv;
+            }
+            return null;
+        }
+        if (v instanceof ViewGroup) {
+            ViewGroup g = (ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                android.widget.TextView found = findTabLabel(g.getChildAt(i), depth + 1);
+                if (found != null) {
+                    return found;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
      * Re-runs the page stretch on a slow timer, asked for from every frame.
      *
      * <p>The apps re-apply their own page metrics whenever they relayout, and
@@ -2663,56 +2605,6 @@ final class LiquidGlassInstaller {
      * the same parent, so the backdrop is whichever sibling is not the bar itself
      * and actually covers the screen.
      */
-    /**
-     * Whether a view is a LiquidGlassHostLayout of ANY generation. instanceof
-     * only matches this generation's class object (each generation loads its
-     * own copy), so an old generation's host must be recognised by name.
-     */
-    private static boolean isHostLayout(View v) {
-        return v != null && "io.github.lengroo.pddlg.LiquidGlassHostLayout"
-                .equals(v.getClass().getName());
-    }
-
-    /** Stock tab-bar layout params for a container (PDD: RelativeLayout, bottom-anchored). */
-    private static ViewGroup.LayoutParams buildStockTabLayoutParams(ViewGroup parent) {
-        if (parent instanceof android.widget.RelativeLayout) {
-            android.widget.RelativeLayout.LayoutParams lp =
-                    new android.widget.RelativeLayout.LayoutParams(
-                            ViewGroup.LayoutParams.MATCH_PARENT,
-                            ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.addRule(android.widget.RelativeLayout.ALIGN_PARENT_BOTTOM);
-            return lp;
-        }
-        return new ViewGroup.MarginLayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT);
-    }
-
-    /**
-     * Clears every translation the module (or a previous generation) left
-     * on the tab hierarchy. A previous generation's centring shift survives
-     * its teardown — teardown re-parents the stock bar but never resets
-     * translationY — so the next install measures the already-shifted
-     * content, computes a wrong bar height and re-applies the wrong shift,
-     * and the corruption perpetuates itself across generations (proven
-     * 2026-11-09, vc74 reload: install measured content -80..146 because
-     * vc73 had left translationY=+40 on the tabs). Reset before ANY
-     * measurement so every install starts from the natural layout.
-     */
-    private static void resetTabTranslations(View v) {
-        if (v == null) {
-            return;
-        }
-        v.setTranslationX(0f);
-        v.setTranslationY(0f);
-        if (v instanceof ViewGroup) {
-            ViewGroup g = (ViewGroup) v;
-            for (int i = 0; i < g.getChildCount(); i++) {
-                resetTabTranslations(g.getChildAt(i));
-            }
-        }
-    }
-
     private static ViewGroup findBackdrop(ViewGroup parent, View tabView) {
         ViewGroup best = null;
         int bestArea = 0;
@@ -2981,20 +2873,6 @@ final class LiquidGlassInstaller {
         if (top == Integer.MAX_VALUE || bottom <= top) {
             return fallback;
         }
-        // Garbage guard: the content must sit inside the tab. A previous
-        // generation's leftover shift can leave stale bounds spanning
-        // outside the column (e.g. -80..146 on a 146px tab); trusting them
-        // inflates the bar to 286px and the droplet with it. Fall back to
-        // the bar's reported height and let the post-layout re-run measure
-        // the settled hierarchy instead.
-        if (top < 0 || bottom > tabHeight || (bottom - top) > tabHeight) {
-            LiquidGlassModule.log(android.util.Log.WARN,
-                    "pdd bar height: content " + top + ".." + bottom
-                            + " tabH=" + tabHeight
-                            + " is outside the tab, using fallback "
-                            + fallback);
-            return fallback;
-        }
         int inset = Math.round(density * 4f);
         int extra = Math.round(density * GlassConfig.pillExtraHeightDp);
         int desired = Math.max(tabHeight, (bottom - top) + inset * 2) + extra;
@@ -3027,22 +2905,10 @@ final class LiquidGlassInstaller {
      * its field) is excluded from the translation, so a full-height
      * content container still moves with its icon and label.
      */
-    /**
-     * Centres each tab's icon+label stack vertically in the bar height.
-     *
-     * @return true only if every visible, laid-out tab was centred with
-     * valid bounds; false when a tab was skipped (not laid out yet, or
-     * its bounds were garbage), in which case the caller re-runs this
-     * after layout. A garbage bound (content outside the tab, e.g.
-     * -80..146 on a 146px tab) must never drive a shift — it would shove
-     * the icons down and the labels out of the pill.
-     */
-    private static boolean centerPddTabContent(ViewGroup tabRow) {
+    private static void centerPddTabContent(ViewGroup tabRow) {
         if (LiquidGlassModule.app() != HostApp.PDD || tabRow == null) {
-            return false;
+            return;
         }
-        boolean centred = false;
-        boolean incomplete = false;
         try {
             for (int i = 0; i < tabRow.getChildCount(); i++) {
                 View tab = tabRow.getChildAt(i);
@@ -3054,19 +2920,6 @@ final class LiquidGlassInstaller {
                 int[] b = {Integer.MAX_VALUE, 0};
                 tabContentBounds(tab, tab.getHeight(), 0, b);
                 if (b[0] >= b[1]) {
-                    continue;
-                }
-                // Garbage guard: content must sit inside the tab. A stale
-                // bound from a previous generation's leftover shift spans
-                // outside the column and would corrupt this install.
-                if (b[0] < 0 || b[1] > tab.getHeight()
-                        || (b[1] - b[0]) > tab.getHeight()) {
-                    incomplete = true;
-                    LiquidGlassModule.log(android.util.Log.WARN,
-                            "pdd tab content NOT centred: tab=" + i
-                                    + " content=" + b[0] + ".." + b[1]
-                                    + " tabH=" + tab.getHeight()
-                                    + " is outside the tab, retry after layout");
                     continue;
                 }
                 float shift = (b[0] + b[1]) * 0.5f - tab.getHeight() * 0.5f;
@@ -3090,7 +2943,6 @@ final class LiquidGlassInstaller {
                         c.setTranslationY(total);
                     }
                 }
-                centred = true;
                 LiquidGlassModule.log(android.util.Log.INFO,
                         "pdd tab content centred: tab=" + i
                                 + " content=" + b[0] + ".." + b[1]
@@ -3101,7 +2953,6 @@ final class LiquidGlassInstaller {
         } catch (Throwable t) {
             LiquidGlassModule.logErr("could not centre tab content", t);
         }
-        return centred && !incomplete;
     }
 
     /**
