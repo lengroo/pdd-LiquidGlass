@@ -38,7 +38,7 @@ EXAMPLE_JARS="$HOME/workspace/study/example/build-manual-compose/jars"
 VERSION="$(sed -n 's/.*android:versionName="\([^"]*\)".*/\1/p' "$PROJECT_DIR/AndroidManifest.xml")"
 VERSION_CODE="$(sed -n 's/.*android:versionCode="\([^"]*\)".*/\1/p' "$PROJECT_DIR/AndroidManifest.xml")"
 OUT="$PROJECT_DIR/build-compose"
-rm -rf "$OUT/work"
+rm -rf "$OUT/work" "$OUT/classes"
 mkdir -p "$OUT/work/compiled-res" "$OUT/work/R" "$OUT/work/classes" "$OUT/work/dex" "$OUT/classes"
 
 echo "== 1. Compile + link resources (app + AARs) =="

@@ -35,17 +35,22 @@ import java.lang.ref.WeakReference;
 final class DropletDragController implements LiquidGlassHostLayout.DragHandler {
 
     /**
-     * KernelSU: pressedScale = 78dp / 56dp. Too much here: PDD's tab columns
-     * are 235px wide and the droplet already fills the pill's height, so
-     * 1.39x blows it well past the pill on both axes and over both
-     * neighbours. 1.2x still reads as a press without leaving the pill.
+     * KernelSU: pressedScale = 78dp / 56dp. Restored to upstream on
+     * 2026-11-10 for long-press parity: with the droplet sized to the tab
+     * again (not the pill height), 1.39x fits the pill on the vertical axis
+     * and overlaps the neighbours the way upstream's magnifier does.
      */
-    private static final float PRESSED_SCALE = 1.2f;
-    /** KernelSU: LocalFloatingBottomBarTabScale = lerp(1f, 1.2f, pressProgress). */
-    private static final float FOCUS_SCALE = 1.2f;
+    private static final float PRESSED_SCALE = 78f / 56f;
     private static final float STRETCH_LIMIT = 0.2f;
     /** KernelSU: release() waits until within 2.5% of the range. */
     private static final float SETTLE_FRACTION = 0.025f;
+    /**
+     * Backstop: a press must never stay stuck if the position never settles
+     * (selection flicker keeps retargeting the droplet, or a frame stalls).
+     * 800ms is well past a normal spring travel (~200-400ms) but short
+     * enough that a stuck magnified droplet is gone within a second.
+     */
+    private static final long RELEASE_WATCHDOG_MS = 800L;
 
     /**
      * Bar growth while held.
@@ -63,7 +68,6 @@ final class DropletDragController implements LiquidGlassHostLayout.DragHandler {
     private WeakReference<ViewGroup> mTabRowRef;
     private final int mTouchSlop;
     private final float mDensity;
-    private final boolean mNight;
     private final Spring mValue;
     private final Spring mVelocity;
     private final Spring mPress;
@@ -75,6 +79,8 @@ final class DropletDragController implements LiquidGlassHostLayout.DragHandler {
     private float mDragStartValue;
     private boolean mDragging;
     private boolean mReleasePending;
+    /** When the pending release was requested; 0 when none is pending. */
+    private long mReleasePendingSinceMs;
 
     private long mLastFrameNs;
     private boolean mFrameScheduled;
@@ -103,12 +109,11 @@ final class DropletDragController implements LiquidGlassHostLayout.DragHandler {
         mHostRef = new WeakReference<>(host);
     }
 
-    DropletDragController(View droplet, ViewGroup tabRow, float density, boolean night) {
+    DropletDragController(View droplet, ViewGroup tabRow, float density) {
         mDropletRef = new WeakReference<>(droplet);
         mTabRowRef = new WeakReference<>(tabRow);
         mTouchSlop = ViewConfiguration.get(droplet.getContext()).getScaledTouchSlop();
         mDensity = density;
-        mNight = night;
 
         float visibility = 0.001f;
         mValue = new Spring(1f, 1000f, visibility, 0f);
@@ -130,6 +135,7 @@ final class DropletDragController implements LiquidGlassHostLayout.DragHandler {
         mTabRowRef = new WeakReference<>(tabRow);
         mDragging = false;
         mReleasePending = false;
+        mReleasePendingSinceMs = 0L;
         mLastSampleMs = 0L;
         mLastFrameNs = 0L;
         float max = tabCount(tabRow) - 1f;
@@ -167,6 +173,8 @@ final class DropletDragController implements LiquidGlassHostLayout.DragHandler {
             mPress.snapTo(0f);
             mScaleX.snapTo(1f);
             mScaleY.snapTo(1f);
+            mReleasePending = false;
+            mReleasePendingSinceMs = 0L;
             apply();
             return;
         }
@@ -174,6 +182,7 @@ final class DropletDragController implements LiquidGlassHostLayout.DragHandler {
         mValue.animateTo(target);
         mVelocity.animateTo(0f);
         mReleasePending = true;
+        mReleasePendingSinceMs = android.os.SystemClock.uptimeMillis();
         schedule();
     }
 
@@ -268,11 +277,26 @@ final class DropletDragController implements LiquidGlassHostLayout.DragHandler {
         // position already carries the host's shadow padding — comparing it
         // directly against a host-relative touch x missed by that padding, so
         // pressing the droplet never registered.
+        //
+        // The trigger area must match the pill the user sees, not the layout
+        // rect: the droplet is scaled (magnified 78/56 while pressed) around
+        // its centre, so its visual bounds are wider and taller than the
+        // layout bounds. A tap on the magnified edge is outside the layout
+        // rect and would fall through to the tab or the feed below; measure
+        // against the scaled bounds instead.
         float x = ev.getX();
+        float y = ev.getY();
         float left = droplet.getLeft() + droplet.getTranslationX();
+        float top = droplet.getTop() + droplet.getTranslationY();
         ViewGroup.LayoutParams lp = droplet.getLayoutParams();
         float width = lp != null && lp.width > 0 ? lp.width : droplet.getWidth();
-        return x >= left && x <= left + width;
+        float height = lp != null && lp.height > 0 ? lp.height : droplet.getHeight();
+        float cx = left + width * 0.5f;
+        float cy = top + height * 0.5f;
+        float vw = width * droplet.getScaleX();
+        float vh = height * droplet.getScaleY();
+        return x >= cx - vw * 0.5f && x <= cx + vw * 0.5f
+                && y >= cy - vh * 0.5f && y <= cy + vh * 0.5f;
     }
 
     /* ---------------- press / release ---------------- */
@@ -287,6 +311,7 @@ final class DropletDragController implements LiquidGlassHostLayout.DragHandler {
     private void release() {
         // KernelSU holds the pressed scale until the droplet has almost arrived.
         mReleasePending = true;
+        mReleasePendingSinceMs = android.os.SystemClock.uptimeMillis();
         schedule();
     }
 
@@ -296,10 +321,21 @@ final class DropletDragController implements LiquidGlassHostLayout.DragHandler {
         }
         float threshold = Math.max((tabCount(mTabRowRef.get()) - 1f)
                 * SETTLE_FRACTION, 0.001f);
-        if (Math.abs(mValue.value() - mValue.target()) > threshold) {
+        // Arrived: within the settle window, or the position spring has
+        // stopped outright (covers a stall where value and target disagree
+        // but nothing is moving any more). Timed out: the watchdog fires
+        // even while still travelling, so a press can never stay stuck
+        // when the selection keeps retargeting the droplet.
+        boolean settled = Math.abs(mValue.value() - mValue.target()) <= threshold
+                || !mValue.isRunning();
+        boolean timedOut = mReleasePendingSinceMs != 0L
+                && android.os.SystemClock.uptimeMillis() - mReleasePendingSinceMs
+                        > RELEASE_WATCHDOG_MS;
+        if (!settled && !timedOut) {
             return;
         }
         mReleasePending = false;
+        mReleasePendingSinceMs = 0L;
         mPress.animateTo(0f);
         mScaleX.animateTo(1f);
         mScaleY.animateTo(1f);

@@ -2205,8 +2205,7 @@ final class LiquidGlassInstaller {
                 // Self-heal: a drag controller that never got created at
                 // install time is created here instead of staying missing.
                 sDrag = new DropletDragController(
-                        (DropletPanel) droplet, tabRow, density,
-                        isNight(host.getContext()));
+                        (DropletPanel) droplet, tabRow, density);
                 sDrag.setPill((LiquidGlassPanel) sGlassRef.get());
                 sDrag.setHost(host);
                 host.setDragHandler(sDrag);
@@ -2644,20 +2643,18 @@ final class LiquidGlassInstaller {
             // Down to the tab columns themselves: each carries a top hairline,
             // and the four of them line up into a divider spanning the row's
             // content box (214..1006 px) right across the pill's top edge.
-            // Their children keep theirs (badges, icon states).
+            // Their children keep theirs (badges, icon states) — stop here.
+            // PDD's hierarchy is one level flatter than WeChat's
+            // (PddTabView -> TabRelativeLayout -> icon/label/badge), so a
+            // further descent would clear the unread badge's red pill
+            // background (digitalFlagView) and the red dot (dotView): the
+            // badge then shows bare white digits, and findTabLabel starts
+            // mistaking the badge for the label. That is the 2026-11-10
+            // "badge sometimes disappears" report.
             for (int i = 0; i < vg.getChildCount(); i++) {
                 View c = vg.getChildAt(i);
                 if (c.getBackground() != null) {
                     c.setBackground(null);
-                }
-                if (c instanceof ViewGroup) {
-                    ViewGroup row = (ViewGroup) c;
-                    for (int j = 0; j < row.getChildCount(); j++) {
-                        View tab = row.getChildAt(j);
-                        if (tab.getBackground() != null) {
-                            tab.setBackground(null);
-                        }
-                    }
                 }
             }
         }
@@ -3288,6 +3285,14 @@ final class LiquidGlassInstaller {
                     tabRowArg != null ? tabRowArg : sTabRowRef.get(),
                     density, night);
             droplet.setVisibility(View.INVISIBLE);
+            // The droplet is the pill the user sees and taps. Make it consume
+            // touches so a tap on it (in particular on its magnified edge)
+            // does not fall through to the tab below — which would re-select
+            // the current tab and drive the feed — or to the content behind
+            // the bar. The drag handler still gets first refusal via the
+            // host's onInterceptTouchEvent, so drags are unaffected: a drag
+            // is claimed there and the droplet is cancelled.
+            droplet.setClickable(true);
             host.addView(droplet, new FrameLayout.LayoutParams(0, 0,
                     android.view.Gravity.TOP | android.view.Gravity.START));
             droplet.setPill(glass);
@@ -3315,7 +3320,7 @@ final class LiquidGlassInstaller {
 
             ViewGroup tabRow = tabRowArg != null ? tabRowArg : sTabRowRef.get();
             if (tabRow != null) {
-                sDrag = new DropletDragController(droplet, tabRow, density, night);
+                sDrag = new DropletDragController(droplet, tabRow, density);
                 sDrag.setPill(glass);
                 sDrag.setHost(host);
                 host.setDragHandler(sDrag);
@@ -3417,16 +3422,17 @@ final class LiquidGlassInstaller {
                 return;
             }
             float density = host.getResources().getDisplayMetrics().density;
-            // The droplet is the selection pill *inside* the pill, so it is
-            // sized to the pill, not to the tab column: full tab width, and
-            // the pill's inner height less a 4dp rim each side. Sizing it to
-            // the tab (146px tall in a 190px pill) left it a short slab
-            // floating low inside a taller pill, with a band of empty glass
-            // above and below — the size mismatch in the field screenshots.
-            // Centred on the pill rather than on the tab: the tabs are
-            // centred in the pill too, so the two centres coincide, but the
-            // droplet no longer depends on where a tab happens to sit.
-            int inset = Math.round(density * 4f);
+            // 2026-11-10 "too short" (Diane: 太矮了; log: droplet 199x158,
+            // pill 42..224, tabH 146, content 19..134 shifted up 19px):
+            // the droplet is sized to the PILL's inner height so it fills
+            // the pill like upstream's (ratio ~0.78), with only a 2dp rim
+            // each side so it reads taller than the 4dp rim did. The
+            // content-height sizing tried at 14:19 went the wrong way
+            // (115px content -> ~93px droplet, far too short) and is
+            // reverted here. Anchored on the pill (centred), matching
+            // upstream's placement; the content's extraUp lift is a
+            // separate alignment matter, not this height fix.
+            int inset = Math.round(density * 2f);
             int w = tab.getWidth();
             int pillInner = pillBottom - pillTop;
             int h = pillInner - inset * 2;
